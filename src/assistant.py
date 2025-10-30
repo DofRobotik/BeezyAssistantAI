@@ -2,7 +2,7 @@ import sys
 import asyncio
 import re
 import time
-from typing import Optional, Literal
+from typing import Optional, Literal,Dict,Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from .llm import LLM
@@ -19,7 +19,7 @@ except ImportError:
 
 
 class AssistantApp:
-    def __init__(self):
+    def __init__(self,callbacks: Optional[Dict[str, Callable]] = None):
         self.vad = VADListener()
         
         # --- STT MODEL TAVSİYESİ ---
@@ -61,13 +61,31 @@ class AssistantApp:
         self.tts_task: Optional[asyncio.Task] = None
         self.current_response_task: Optional[asyncio.Task] = None
 
+        # --- YENİ ---
+        # UI callback'lerini ve çalışma durumunu sakla
+        self.callbacks = callbacks if callbacks else {}
+        self.running = False
+
+    def _trigger_callback(self, name: str, *args):
+        if name in self.callbacks:
+            try:
+                self.callbacks[name](*args)
+            except Exception as e:
+                print(f"[CALLBACK-ERROR] '{name}' callback'i tetiklenirken hata: {e}")
+
+    # --- GÜNCELLENMİŞ METOT ---
     async def say(self, text: str, lang, timings: dict):
-        """Asistanın konuşmasını başlatır ve görevi tts_task'ta saklar."""
+        """
+        Asistanın konuşmasını başlatır (SADECE TTS).
+        UI callback'i buradan kaldırıldı.
+        """
         
         # Sadece ilk çağrıda 'TTS Sentez Başlangıcı' zaman damgasını al
         if 'first_tts_start' not in timings:
             timings['first_tts_start'] = time.monotonic()
             
+        # UI tetikleyicisi buradan KALDIRILDI.
+        
         self.tts_task = asyncio.create_task(self.tts.tts_and_play(text, lang, timings))
         try:
             await self.tts_task
@@ -77,62 +95,71 @@ class AssistantApp:
         finally:
             self.tts_task = None
 
-    # <-- METOT GÜNCELLENDİ (llm_stream_complete eklendi) -->
     def run_llm_producer(self, text: str, lang: Literal["en", "tr"], queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, timings: dict):
         """
         (THREAD İÇİNDE ÇALIŞIR)
-        LLM stream'ini tüketir, cümlelere böler ve kuyruğa atar.
+        LLM stream'ini tüketir, 'chunk' (UI için) ve 'sentence' (TTS için) 
+        olarak kuyruğa atar.
         """
         buffer = ""
-        # Cümle bölme regex'i (Virgülü eklemek isteğe bağlıdır, daha hızlı ama kesik TTS sağlar)
         sentence_pattern = re.compile(r'(?<=[.?!])\s+') 
-        # sentence_pattern = re.compile(r'(?<=[.?!,])\s+') # Agresif bölme
-        
         first_token = True
+
+        def q_put(item):
+            """Thread-safe kuyruğa ekleme yardımcısı."""
+            asyncio.run_coroutine_threadsafe(queue.put(item), loop) # .result() kullanma, ana döngüyü bloklar
 
         try:
             for chunk in self.llm.stream_response(text, lang):
                 
                 if first_token:
-                    timings['first_llm_token'] = time.monotonic() # LLM ilk token
+                    timings['first_llm_token'] = time.monotonic() 
                     first_token = False
 
                 if "message" in chunk and "content" in chunk["message"]:
                     piece = chunk["message"]["content"]
-                    sys.stdout.write(piece)
-                    sys.stdout.flush()
+                    
+                    # --- YENİ: UI'a anında 'chunk' gönder ---
+                    q_put(("chunk", piece))
+                    
                     buffer += piece
-
                     sentences = sentence_pattern.split(buffer)
 
                     if len(sentences) > 1:
                         for i in range(len(sentences) - 1):
                             sentence_to_play = sentences[i].strip()
                             if sentence_to_play:
-                                asyncio.run_coroutine_threadsafe(
-                                    queue.put(sentence_to_play), loop
-                                ).result()
+                                # --- YENİ: TTS için 'sentence' gönder ---
+                                q_put(("sentence", sentence_to_play))
 
                         buffer = sentences[-1]
 
-            final_piece = buffer.strip()
-            if final_piece:
-                asyncio.run_coroutine_threadsafe(
-                    queue.put(final_piece), loop
-                ).result()
-
         except Exception as e:
             print(f"\n[ERROR] LLM Producer thread'inde hata: {e}")
+            q_put(("error", str(e))) # Hata durumunu da bildir
         finally:
             # LLM stream tamamlanma zamanı
-            timings['llm_stream_complete'] = time.monotonic() # <-- YENİ
-            asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+            timings['llm_stream_complete'] = time.monotonic() 
+            
+            # Kalan son cümleyi de TTS için gönder
+            final_piece = buffer.strip()
+            if final_piece:
+                q_put(("sentence", final_piece))
+            
+            # --- YENİ: Bitiş sinyalini gönder ---
+            q_put(("end", None))
 
     # <-- METOT GÜNCELLENDİ (Tüm 'say' çağrılarına 'timings' eklendi) -->
     async def _handle_logic(self, text: str, lang: Literal["en", "tr"], timings: dict):
         loop = asyncio.get_running_loop()
         # If we are waiting for YES/NO:
         if self.awaiting_confirmation and self.pending_station:
+            async def say_and_show(msg: str):
+                self._trigger_callback("on_response_start") # Baloncuk yarat
+                self._trigger_callback("on_response_chunk", msg) # Doldur
+                self._trigger_callback("on_response_end") # Bitir
+                await self.say(msg, lang, timings=timings) # Seslendir
+            
             # ... (Confirmation logic remains same)
             if self.agent.is_yes(text):
                 ok, msg = await self.agent.send_navigation(self.pending_station)
@@ -141,28 +168,28 @@ class AssistantApp:
                 self.pending_station = None
                 if ok:
                     if lang == "en":
-                        await self.say(f"Great. Guiding you to {station} now.",lang=lang,timings=timings)
+                        await say_and_show(f"Great. Guiding you to {station} now.")
                     else:
-                        await self.say(f"Harika. Sizi {station} noktasına yönlendiriyorum.",lang=lang,timings=timings)
+                        await say_and_show(f"Harika. Sizi {station} noktasına yönlendiriyorum.")
                 else:
                     if lang == "en":
-                        await self.say(f"Sorry, I couldn’t start navigation. {msg}",lang=lang,timings=timings)
+                        await say_and_show(f"Sorry, I couldn’t start navigation. {msg}")
                     else:
-                        await self.say(f"Üzgünüm navigasyonu başlatamıyorum. {msg}",lang=lang,timings=timings)
+                        await say_and_show(f"Üzgünüm navigasyonu başlatamıyorum. {msg}")
                 return
             elif self.agent.is_no(text):
                 self.awaiting_confirmation = False
                 self.pending_station = None
                 if lang == "en":
-                    await self.say("Okay. Let me know if you need anything else.",lang=lang,timings=timings)
+                    await say_and_show("Okay. Let me know if you need anything else.")
                 else:
-                    await self.say("Tamamdır. Başka bir şeye ihtiyacın olursa söylemekten çekinme!",lang=lang,timings=timings)
+                    await say_and_show("Tamamdır. Başka bir şeye ihtiyacın olursa söylemekten çekinme!")
                 return
             else:
                 if lang == "en":
-                    await self.say("Please say yes to start or no to cancel.",lang=lang,timings=timings)
+                    await say_and_show("Please say yes to start or no to cancel.")
                 else:
-                    await self.say("Başlamak için evet, istemiyorsan hayır diyebilirsin.",lang=lang,timings=timings)
+                    await say_and_show("Başlamak için evet, istemiyorsan hayır diyebilirsin.")
                 return
 
         # No pending confirmation → classify intent
@@ -180,6 +207,13 @@ class AssistantApp:
             decision = {"request_type": "chat", "reason": "Sınıflandırma sırasında hata."}
         timings['intent_classifier_end'] = time.monotonic() # <-- YENİ ZAMAN DAMGASI
         request_type = decision.get("request_type")
+
+        async def say_and_show(msg: str):
+            self._trigger_callback("on_response_start")
+            self._trigger_callback("on_response_chunk", msg)
+            self._trigger_callback("on_response_end")
+            await self.say(msg, lang, timings=timings)
+
         # --- DEĞİŞİKLİK 1 BİTTİ ---
         if request_type == "navigation":
             station = decision.get("target_station")
@@ -188,16 +222,16 @@ class AssistantApp:
                 self.awaiting_confirmation = True
                 self.pending_station = station
                 prompt = self.agent.build_confirmation_prompt(self.pending_station, lang)
-                await self.say(prompt, lang, timings=timings)
+                await say_and_show(prompt)
             else:
                 # LLM, var olmayan bir istasyon döndürürse
                 print(f"[ERROR] LLM, geçersiz istasyon döndürdü: {station}")
-                await self.say("Nereye gitmek istediğini anladım ama o istasyonu bulamadım.", lang, timings=timings)
+                await say_and_show("Nereye gitmek istediğini anladım ama o istasyonu bulamadım.")
         
         elif request_type == "iot":
             if not self.iot:
                 print("[ERROR] IoT komutu algılandı ancak IoT servisi başlatılamadı.")
-                await self.say("Akıllı cihaz komutunu anladım ancak kontrol servisine şu anda bağlı değilim.", lang, timings=timings)
+                await say_and_show("Akıllı cihaz komutunu anladım ancak kontrol servisine şu anda bağlı değilim.")
                 return
 
             target_code = decision.get("target_device_code")
@@ -216,62 +250,72 @@ class AssistantApp:
                 )
                 
                 # Kullanıcıya geri bildirim ver
-                await self.say(message, lang, timings=timings)
+                await say_and_show(message)
 
             except Exception as e:
                 print(f"[ERROR] IoT executor'da kritik hata: {e}")
                 error_msg = "Akıllı cihazlara komut gönderirken beklenmedik bir hata oluştu."
-                await self.say(error_msg, lang, timings=timings)
+                await say_and_show(error_msg)
 
         else:
-            # LLM Akışı ve Streaming TTS
-            sys.stdout.write("[ASSISTANT] ")
-            sys.stdout.flush()
-
-            queue = asyncio.Queue()
-
-            # --- DEĞİŞİKLİK 2: STREAMING LLM BAŞLANGICINI ZAMANLA ---
-            timings['llm_stream_start'] = time.monotonic() # <-- YENİ ZAMAN DAMGASI
-            # --- DEĞİŞİKLİK 2 BİTTİ ---
+            # --- YENİ: STREAMING CHAT MANTIĞI ---
+            timings['llm_stream_start'] = time.monotonic() 
             
+            queue = asyncio.Queue()
             producer_task = loop.run_in_executor(
                 self.llm_executor,
                 self.run_llm_producer,
-                text,
-                lang,
-                queue,
-                loop,
-                timings
+                text, lang, queue, loop, timings
             )
 
-            sentences_spoken = 0
+            first_chunk = True
             try:
-                # ... (Kalan kod aynı) ...
                 while True:
-                    sentence = await queue.get()
-                    if sentence is None:
+                    item = await queue.get()
+                    if not item: 
+                        print("[WARN] Kuyruktan boş öğe alındı.")
+                        continue
+                    
+                    msg_type, data = item
+                    
+                    if msg_type == "chunk":
+                        if first_chunk:
+                            # İlk 'chunk' geldiğinde UI'ı başlat
+                            self._trigger_callback("on_response_start")
+                            sys.stdout.write("[ASSISTANT] ")
+                            sys.stdout.flush()
+                            first_chunk = False
+                        
+                        # UI'a ve terminale chunk'ı yaz
+                        self._trigger_callback("on_response_chunk", data)
+                        sys.stdout.write(data)
+                        sys.stdout.flush()
+                    
+                    elif msg_type == "sentence":
+                        # TTS için tam cümleyi seslendir
+                        if data:
+                            await self.say(data, lang, timings=timings)
+                    
+                    elif msg_type == "end":
+                        self._trigger_callback("on_response_end")
+                        print() # Terminalde yeni satıra geç
                         break
                     
-                    if sentences_spoken == 0 and 'first_sentence_received' not in timings:
-                         timings['first_sentence_received'] = time.monotonic()
+                    elif msg_type == "error":
+                        print(f"[ERROR] Stream hatası alındı: {data}")
+                        if first_chunk: # Hata oluştu ama hiç konuşulmadı
+                           await say_and_show("Üzgünüm, bir hata oluştu." if lang == "tr" else "Sorry, an error occurred.")
+                        break
 
-                    await self.say(sentence, lang, timings=timings)
-                    sentences_spoken += 1
-                print()
             except asyncio.CancelledError:
                 print("\n[_handle_logic] Streaming TTS iptal edildi (Barge-in).")
+                producer_task.cancel() # Thread'i durdurmayı dene (doğrudan etki etmez ama executor'a sinyal verir)
                 raise
             finally:
-                if sentences_spoken == 0:
-                    if lang == "en":
-                        answer = "How can I help you?"
-                    else:
-                        answer = "Nasıl yardımcı olabilirim?"
-                    try:
-                        await self.say(answer, lang, timings=timings)
-                    except asyncio.CancelledError:
-                         print("[_handle_logic] Varsayılan yanıt sırasında iptal.")
-                         raise
+                # Hiçbir chunk gelmediyse (örn. LLM boş yanıt verdi)
+                if first_chunk:
+                    print("[_handle_logic] Hiçbir LLM chunk'ı alınmadı.")
+                    await say_and_show("Nasıl yardımcı olabilirim?" if lang == "tr" else "How can I help you?")
 
     # <-- METOT TAMAMEN YENİLENDİ -->
     def _print_timings(self, timings: dict, start_time: float):
@@ -369,6 +413,10 @@ class AssistantApp:
             if lang not in ["en", "tr"]:
                 lang = "en"
 
+            # --- YENİ ---
+            # Arayüze "İşleniyor" sinyalini ve STT metnini gönder
+            self._trigger_callback("on_processing_started", text)
+
             # 2. Logic / LLM / TTS
             timings['logic_start'] = time.monotonic()  # Logic başlama
             await self._handle_logic(text, lang, timings) # timings'i ilet
@@ -379,6 +427,8 @@ class AssistantApp:
             raise
         except Exception as e:
             print(f"[ERROR] Yanıt işleme sırasında beklenmedik hata: {e.__class__.__name__}: {e}")
+            # Arayüze hata sinyali gönder
+            self._trigger_callback("on_error", f"Yanıt işlenirken hata: {e}")
             
         finally:
             # İptal edilmediyse toplam bitiş zamanını yakala
@@ -388,19 +438,44 @@ class AssistantApp:
             # Sadece iptal edilmediyse (barge-in) ve STT bittiyse raporu yazdır.
             if not timings.get('cancelled', False) and 'stt_end' in timings:
                 self._print_timings(timings, start_time)
+            
+            # --- YENİ ---
+            # Görev bittiğinde (iptal edilmediyse) arayüze "Hazır" sinyali gönder
+            if not timings.get('cancelled', False):
+                self._trigger_callback("on_ready")
                 
             self.current_response_task = None
 
+    # --- YENİ ---
+    # UI'dan çağırmak için stop metodu
+    async def stop(self):
+        """Asistanı ve VAD'ı güvenli bir şekilde durdurur."""
+        print("[SHUTDOWN] Stop komutu alındı.")
+        if self.running:
+            await self.vad.stop() # Bu, 'run' metodundaki 'async for' döngüsünü kıracaktır
+        self.running = False
 
     async def run(self):
+        self.running = True # Çalışma bayrağını ayarla
         await self.vad.start()
         print("Listening... (speak to the mic)")
-        
+        # --- YENİ ---
+        # Başlangıçta arayüze "Hazır" sinyali gönder
+        self._trigger_callback("on_ready")
+
         try:
             async for is_started, utter_pcm in self.vad.utterances():
                 
+                # --- YENİ ---
+                # UI'ı durdurmak için 'self.running' bayrağını kontrol et
+                if not self.running:
+                    print("[RUN] 'self.running' False olarak ayarlandı, döngüden çıkılıyor.")
+                    break
+
                 if is_started:
                     print("[BARGE-IN] Konuşma algılandı...")
+                    self._trigger_callback("on_listening_started")
+
                     if self.current_response_task and not self.current_response_task.done():
                         print("[BARGE-IN] Kullanıcı konuşmaya başladı. Önceki yanıt iptal ediliyor.")
                         self.current_response_task.cancel()
@@ -422,11 +497,15 @@ class AssistantApp:
             print(f"\n[CRITICAL ERROR] Ana 'run' döngüsünde beklenmedik bir hata oluştu: {e.__class__.__name__}: {e}")
             import traceback
             traceback.print_exc()
+            # --- YENİ ---
+            self._trigger_callback("on_error", f"Kritik hata: {e}")
 
         finally:
             print("[SHUTDOWN] Uygulama sonlanıyor. Kaynaklar temizleniyor...")
             
-            await self.vad.stop()
+            # VAD'ın zaten durdurulmuş olması gerekir, ancak tekrar kontrol et
+            if self.vad.running:
+                 await self.vad.stop()
 
             if self.current_response_task and not self.current_response_task.done():
                  self.current_response_task.cancel()
@@ -446,3 +525,6 @@ class AssistantApp:
             self.llm_executor.shutdown(wait=False)
             self.iot_executor.shutdown(wait=False)
             self.tts.shutdown()
+            
+            self.running = False # Tamamen durduğunu işaretle
+            print("[SHUTDOWN] Temizleme tamamlandı.")
