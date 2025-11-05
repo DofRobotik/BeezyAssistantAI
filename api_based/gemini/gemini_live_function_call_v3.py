@@ -37,7 +37,9 @@ ROBOT_ID = "amr-1"
 # ---------------------------------------------
 
 # --- IoT Cihaz Haritası (DEĞİŞİKLİK YOK) ---
-iot = AmrLoungeClass()
+iot_service_url = "10.10.10.244"
+iot_port = 3001
+iot = AmrLoungeClass(iot_service_url, iot_port)
 light_device_map = {}
 all_iot_device_codes = []
 for group_index, devices in iot._AmrLoungeClass__lounge_place.items():
@@ -52,12 +54,16 @@ def execute_iot_command(target_code: str, action: str) -> Tuple[bool, str]:
     """Gerçek IoT eylemi."""
     try:
         if target_code in light_device_map:
-            dev = light_device_map[target_code]
+            device_info = light_device_map[target_code]
+            group = device_info["group"]
+            index = device_info["index"]
             if action == "turn_on":
+                iot.send_data_for_light_func(group, index, switch=True, dimming=150)
                 # iot.send_data_for_light_func(dev["group"], dev["index"], True, 150)
                 print(f"*** SİMÜLASYON: {target_code} AÇILDI ***")
                 return True, f"{target_code} başarıyla açıldı."
             elif action == "turn_off":
+                iot.send_data_for_light_func(group, index, switch=False, dimming=0)
                 # iot.send_data_for_light_func(dev["group"], dev["index"], False, 0)
                 print(f"*** SİMÜLASYON: {target_code} KAPATILDI ***")
                 return True, f"{target_code} başarıyla kapatıldı."
@@ -473,32 +479,49 @@ class GeminiAssistant:
             await asyncio.to_thread(stream.write, bytestream)
 
     async def run(self):
+        tasks = set()  # Görevleri takip etmek için bir set
         try:
-            async with (
-                client.aio.live.connect(model=MODEL_2, config=CONFIG) as session,
-                asyncio.TaskGroup() as tg,
-            ):
+            async with client.aio.live.connect(model=MODEL_2, config=CONFIG) as session:
                 self.session = session
 
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=100)
 
-                send_text_task = tg.create_task(self.send_realtime())
+                # Görevleri oluştur ve sete ekle
+                tasks.add(asyncio.create_task(self.send_realtime()))
+                tasks.add(asyncio.create_task(self.listen_audio()))
+                tasks.add(asyncio.create_task(self.control_mic()))
+                tasks.add(asyncio.create_task(self.receive_audio()))
+                tasks.add(asyncio.create_task(self.play_audio()))
 
-                tg.create_task(self.listen_audio())
-                tg.create_task(self.control_mic())
-
-                tg.create_task(self.receive_audio())
-                tg.create_task(self.play_audio())
-
-                await send_text_task
-                raise asyncio.CancelledError("Kullanıcı çıkış yaptı")
+                # Tüm görevlerin tamamlanmasını bekle (veya birinin hata vermesini)
+                await asyncio.gather(*tasks)
 
         except (asyncio.CancelledError, KeyboardInterrupt):
             print("\nProgram sonlandırılıyor...")
-        except ExceptionGroup as EG:
-            traceback.print_exception(EG)
+            # Hata veya kesinti durumunda 'finally' bloğu çalışacak
+
+        except Exception as e:
+            # Görevlerden herhangi birinde oluşan beklenmedik hataları yakala
+            print(f"Ana 'run' döngüsünde beklenmedik bir hata oluştu: {e}")
+            traceback.print_exc()
+            # Hata durumunda 'finally' bloğu çalışacak
+
         finally:
+            # Program sonlanırken (hata, kesinti veya normal çıkış)
+            # tüm görevlerin düzgünce iptal edildiğinden emin ol.
+            print("Tüm görevler iptal ediliyor...")
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            # Görevlerin iptal işlemini tamamlaması için bekle
+            if tasks:
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    pass  # Kapatma sırasında bu beklenir
+
             # Kaynakları temizle
             # 'self.audio_stream' kontrolü kaldırıldı, çünkü artık 'listen_audio'
             # kendi stream'ini lokal olarak yönetiyor ve kapatıyor.
