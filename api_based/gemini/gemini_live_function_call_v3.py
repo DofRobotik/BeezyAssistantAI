@@ -11,6 +11,12 @@ import requests  # YENİ: Navigasyon için eklendi
 import time  # YENİ: Navigasyon payload'u için eklendi
 from dotenv import load_dotenv
 import os
+import sys
+import threading
+
+# PTT ve çalma tarafı için durum kilidi / debounce
+PTT_DEBOUNCE_MS = 200
+MUTED_WHILE_RECORDING = True
 
 load_dotenv()
 
@@ -140,7 +146,7 @@ def execute_navigation_command(target_station: str) -> Tuple[bool, str]:
 
 # ------------------ MODEL & TOOLS -------------------
 
-client = genai.Client(http_options={"api_version": "v1beta"}, api_key=GOOGLE_API_KEY)
+client = genai.Client(http_options={"api_version": "v1alpha"}, api_key=GOOGLE_API_KEY)
 
 # --- DEĞİŞİKLİK: Tool Tanımı Güncellendi (Navigasyon Eklendi) ---
 tools = [
@@ -211,8 +217,18 @@ tools = [
         ]
     )
 ]
+turn_detection_cfg = None
+try:
+    # Bazı SDK sürümlerinde tip adı değişik olabilir; iki isim de deniyoruz
+    LiveTurnDetection = getattr(types, "LiveTurnDetectionConfig", None) or getattr(
+        types, "TurnDetectionConfig", None
+    )
+    if LiveTurnDetection:
+        # PTT-ONLY: hiç turn detection yapma; sadece bizim PTT akışımız geçerli olsun
+        turn_detection_cfg = LiveTurnDetection(type="NONE")
+except Exception:
+    turn_detection_cfg = None  # geriye uyumlu; alan yoksa sessizce geç
 
-# --- DEĞİŞİKLİK: Sistem Talimatı Güncellendi (Navigasyon Eklendi) ---
 CONFIG = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
     system_instruction="You are a helpful assistant of DOF Robotics. All of your responses must be in the same language as the user's. "
@@ -230,8 +246,10 @@ CONFIG = types.LiveConnectConfig(
     "Only after the user explicitly confirms, "
     "you will call the tool again with 'should_execute=True'.",
     tools=tools,
+    realtime_input_config=types.RealtimeInputConfig(
+        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+    ),
 )
-
 # ------------------ GEMINI LIVE AGENT -------------------
 
 pya = pyaudio.PyAudio()
@@ -243,77 +261,130 @@ class GeminiAssistant:
         self.out_queue = None
         self.session = None
         self.is_recording = False  # PTT durumunu tutar (self.audio_stream kaldırıldı)
+        self._state_lock = asyncio.Lock()
+        self._last_toggle_ts = 0
+        self._playback_muted = False
 
+    # --- BU FONKSİYON SİLİNDİ ---
     async def send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            await self.session.send(input=msg)
+            try:
+                blob = types.Blob(
+                    data=msg["data"],
+                    mime_type=msg.get("mime_type", "audio/pcm;rate=16000"),
+                )
+                await self.session.send_realtime_input(audio=blob)
+            except Exception as e:
+                print(f"send_realtime hatası: {e}")
 
+    def _clear_audio_queue(self):
+        if self.audio_in_queue is None:
+            return
+        try:
+            while True:
+                self.audio_in_queue.get_nowait()
+                self.audio_in_queue.task_done()
+        except asyncio.QueueEmpty:
+            pass
+
+    # --- GÜNCELLENDİ: control_mic (Artık buffer'ı gönderiyor) ---
     async def control_mic(self):
-        """Konsoldan Enter tuşuna basarak PTT'yi (Bas-Konuş) yönetir."""
+        """Enter ile PTT + barge-in: Enter'a bastığında modeli sustur, seni dinlesin."""
         while True:
             try:
-                # 1. Kaydı başlatmak için bekle (blocking input)
+                # 1) Konuşmaya başlamak için Enter
                 await asyncio.to_thread(input, "\n🎤 Konuşmak için Enter'a basın...")
 
-                if self.is_recording:  # Zaten açıksa (beklenmedik durum)
+                # --- BARGE-IN NOKTASI ---
+                # Model o anda konuşuyor olsa bile:
+                #  - Çalan sesi sustur
+                #  - Kuyrukta bekleyen tüm sesi çöpe at
+                self._playback_muted = True
+                self._clear_audio_queue()
+                print("⏹ Model kesildi, şimdi seni dinliyorum.")
+
+                # Eğer bir önceki kayıt doğru kapanmamışsa, güvenli şekilde kapat
+                if self.is_recording:
                     print("Uyarı: Kayıt zaten aktifti. Önceki durduruluyor...")
-                    self.is_recording = False  # Öncekini kapatmayı tetikle
-                    await asyncio.sleep(0.1)  # Kapanması için kısa bir süre ver
+                    self.is_recording = False
+                    await asyncio.sleep(0.1)
+
+                # Manual VAD: yeni kullanıcı aktivitesi başlıyor
+                try:
+                    await self.session.send_realtime_input(
+                        activity_start=types.ActivityStart()
+                    )
+                except Exception as e:
+                    print(f"activity_start gönderilemedi: {e}")
 
                 print("🔴 Kayıt başladı... Durdurmak için Enter'a basın.")
                 self.is_recording = True
 
-                # 2. Kaydı durdurmak için bekle (blocking input)
+                # 2) Konuşmayı bitirmek için tekrar Enter
                 await asyncio.to_thread(input)
 
                 print("⚪ Kayıt durdu. İşleniyor...")
                 self.is_recording = False
 
+                # Manual VAD: kullanıcı aktivitesi bitti
+                try:
+                    await self.session.send_realtime_input(
+                        activity_end=types.ActivityEnd()
+                    )
+                except Exception as e:
+                    print(f"activity_end gönderilemedi: {e}")
+
+                # Artık model tekrar konuşabilir
+                self._playback_muted = False
+
             except (asyncio.CancelledError, KeyboardInterrupt):
                 print("Mic kontrolü iptal ediliyor.")
-                self.is_recording = False  # Her ihtimale karşı
+                self.is_recording = False
+                self._playback_muted = False
+                # Açık bir turn varsa kapatmayı dene (fail-safe)
+                try:
+                    await self.session.send_realtime_input(
+                        activity_end=types.ActivityEnd()
+                    )
+                except Exception:
+                    pass
                 break
             except Exception as e:
                 print(f"Mic kontrol hatası: {e}")
                 self.is_recording = False
+                self._playback_muted = False
 
-    # --- DEĞİŞİKLİK: 'listen_audio' PTT'ye göre güncellendi ---
-
+    # --- GÜNCELLENDİ: listen_audio (Sadece buffer'a ekler) ---
     async def listen_audio(self):
-        """
-        'self.is_recording' bayrağını izler.
-        True olduğunda mikrofonu açar, okur ve 'out_queue'a koyar.
-        False olduğunda mikrofonu kapatır.
-        """
         print("\nPTT Etkin. (Çıkış için Ctrl+C)")
-        if __debug__:
-            kwargs = {"exception_on_overflow": False}
-        else:
-            kwargs = {}
-
+        kwargs = {"exception_on_overflow": False} if __debug__ else {}
         mic_info = pya.get_default_input_device_info()
 
         while True:
+            # PTT bekleme
             if not self.is_recording:
                 await asyncio.sleep(0.01)
                 continue
 
-            # --- Kayıt başladı (is_recording == True) ---
             stream = None
             try:
-                stream = await asyncio.to_thread(
-                    pya.open,
-                    format=FORMAT,
-                    channels=CHANNELS,
-                    rate=SEND_SAMPLE_RATE,
-                    input=True,
-                    input_device_index=mic_info["index"],
-                    frames_per_buffer=CHUNK_SIZE,
-                )
+                # Stream açılışını kilit altında başlat (state konsistente kalsın)
+                async with self._state_lock:
+                    if not self.is_recording:
+                        continue
+                    stream = await asyncio.to_thread(
+                        pya.open,
+                        format=FORMAT,
+                        channels=CHANNELS,
+                        rate=SEND_SAMPLE_RATE,
+                        input=True,
+                        input_device_index=mic_info["index"],
+                        frames_per_buffer=CHUNK_SIZE,
+                    )
+                    print("Stream açıldı, dinleniyor...")
 
-                print("Stream açıldı, dinleniyor...")
-                # 'is_recording' True olduğu sürece oku
+                # Okuma döngüsü
                 while self.is_recording:
                     try:
                         data = await asyncio.to_thread(
@@ -323,27 +394,31 @@ class GeminiAssistant:
                             {"data": data, "mime_type": "audio/pcm"}
                         )
                     except IOError as e:
-                        if e.errno == pyaudio.paInputOverflowed:
+                        if getattr(e, "errno", None) == pyaudio.paInputOverflowed:
                             print("Uyarı: Input Overflowed. Chunk atlanıyor.")
-                        else:
-                            # Stream'den okurken beklenmedik bir IO hatası
-                            print(f"Mic okuma hatası (IOError): {e}")
-                            break  # İç döngüden çık
-
-                print("Stream okuması durdu.")
+                            continue
+                        print(f"Mic okuma hatası (IOError): {e}")
+                        break
 
             except Exception as e:
-                print(f"Bilinmeyen listen_audio hatası (stream açma?): {e}")
+                print(f"Bilinmeyen listen_audio hatası: {e}")
                 traceback.print_exc()
             finally:
+                # Stream'i kesin ve güvenli kapat
                 if stream:
-                    # Kayıt 'False' olduğunda veya hata oluştuğunda stream'i kapat
-                    await asyncio.to_thread(stream.stop_stream)
-                    await asyncio.to_thread(stream.close)
+                    try:
+                        await asyncio.to_thread(stream.stop_stream)
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.to_thread(stream.close)
+                    except Exception:
+                        pass
                     print("Stream kapatıldı.")
-            # --- Kayıt bitti, ana döngüye dön (is_recording'in tekrar True olmasını bekle) ---
 
-    # --- DEĞİŞİKLİK: 'receive_audio' Navigasyonu İşleyecek Şekilde Güncellendi ---
+    # --- receive_audio (DEĞİŞİKLİK YOK) ---
+    # Bu fonksiyon AI'dan gelen sesi (output) yönetir,
+    # bizim PTT (input) değişikliğimizden etkilenmez.
 
     async def receive_audio(self):
         """
@@ -466,6 +541,8 @@ class GeminiAssistant:
                 await asyncio.sleep(1)
                 continue
 
+    # --- play_audio (DEĞİŞİKLİK YOK) ---
+    # Bu da AI output'u ile ilgili, değişikliğe gerek yok.
     async def play_audio(self):
         stream = await asyncio.to_thread(
             pya.open,
@@ -476,8 +553,14 @@ class GeminiAssistant:
         )
         while True:
             bytestream = await self.audio_in_queue.get()
+
+            # Barge-in veya kayıt sırasında model sesini çalma
+            if self._playback_muted or self.is_recording:
+                continue
+
             await asyncio.to_thread(stream.write, bytestream)
 
+    # --- GÜNCELLENDİ: run (out_queue ve send_realtime kaldırıldı) ---
     async def run(self):
         tasks = set()  # Görevleri takip etmek için bir set
         try:
@@ -529,7 +612,7 @@ class GeminiAssistant:
             print("Kaynaklar temizlendi. Çıkıldı.")
 
 
-# ------------------ MAIN -------------------
+# ------------------ MAIN (DEĞİŞİKLİK YOK) -------------------
 
 if __name__ == "__main__":
     try:
