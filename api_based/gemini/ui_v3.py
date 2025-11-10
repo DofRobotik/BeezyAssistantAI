@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QTextEdit,
     QMessageBox,
-    QGraphicsDropShadowEffect,  # <-- BURAYA EKLENDİ
+    QGraphicsDropShadowEffect,
+    QTextBrowser,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QObject
 from PySide6.QtGui import QFont, QColor
@@ -47,6 +48,7 @@ class GeminiLiveWorker(QObject):
     # Ana thread (GUI) ile iletişim için sinyaller
     status_changed = Signal(str)
     response_received = Signal(str)
+    link_received = Signal(str, str)  # <-- YENİ SİNYAL (url, title)
     error_occurred = Signal(str)
     turn_finished = Signal()
 
@@ -82,13 +84,15 @@ class GeminiLiveWorker(QObject):
 
         # PyAudio
         self.pya = pyaudio.PyAudio()
+        self._seen_urls = set()
+        self._latest_metadata = None
 
         # Gemini Client
         try:
             self.client = genai.Client(
                 http_options={"api_version": "v1alpha"}, api_key=self.GOOGLE_API_KEY
             )
-            self.setup_tools_and_config()
+            self.setup_tools_and_config()  # <-- Bu fonksiyonu GÜNCELLEDİK
             self.status_changed.emit("Asistan başlatıldı.")
         except Exception as e:
             self.error_occurred.emit(f"Gemini istemcisi başlatılamadı: {str(e)}")
@@ -150,7 +154,7 @@ class GeminiLiveWorker(QObject):
         )
         self.emotions = ["happy", "sad", "neutral"]
 
-        # Tools (v3.py'den) - BU KISIM AYNI KALIYOR
+        # Tools (v3.py'den) - YENİ TOOL EKLENDİ
         tools = [
             types.Tool(
                 function_declarations=[
@@ -194,7 +198,7 @@ class GeminiLiveWorker(QObject):
                             "required": ["target_station", "reason"],
                         },
                     ),
-                    # 3. Emotion Tool - BU KISIM AYNI KALIYOR
+                    # 3. Emotion Tool
                     types.FunctionDeclaration(
                         name="sense_of_response",
                         description="Sense of Assistant's response. Will directly used to show user response emotion by LED panels.",
@@ -211,14 +215,14 @@ class GeminiLiveWorker(QObject):
             types.Tool(google_search=types.GoogleSearch()),
         ]
 
-        # --- YENİ SİSTEM PROMPT'U (İNGİLİZCE) ---
+        # --- GÜNCELLENMİŞ SİSTEM PROMPT'U (İNGİLİZCE) ---
         system_instruction_prompt = (
             "You are Beezy, a helpful, friendly, and proactive service robot assistant from DOF Robotics. "
             "Your **permanent location** is the Cevahir AVM in Türkiye. You are never lost and you always know you are in this mall.\n\n"
             "Your **primary goal** is to assist visitors. Your main capabilities are:\n"
             "1.  **Navigation:** Guiding users to specific stations within the mall.\n"
             "2.  **IoT Control:** Controlling prototype devices (lights).\n"
-            "3.  **General Conversation:** Answering questions about the mall or providing general help.\n\n"
+            "3.  **General Conversation:** Answering questions about the mall or providing general help (using Google Search).\n\n"  # <-- Güncellendi
             "## CORE BEHAVIOR: BE PROACTIVE WITH NAVIGATION ##\n"
             "This is your most important rule. You are a mobile robot, not a generic search engine.\n"
             f"You have a defined list of navigation stations:\n{self.station_prompt_list}\n"
@@ -229,7 +233,7 @@ class GeminiLiveWorker(QObject):
             "  * **User:** 'Buralarda yemek yiyebileceğim bir yer var mı?'\n"
             "  * **WRONG Response:** 'Üzgünüm, nerede olduğunuzu bilmiyorum.' (This is wrong. You ALWAYS know you are in Cevahir AVM).\n"
             "  * **WRONG Response:** 'Food Court'ta yemek yiyebilirsiniz.' (This is not helpful, you are a robot, you must offer to GUIDE them).\n"
-            "  * **CORRECT Response:** 'Elbette, 'station_a' (Food Court) alanımız var. Sizi oraya götürmemi ister misiniz?' (You will then call 'navigate_to_station' with should_execute=False).\n\n"
+            "  * **CORRECT Response:** 'Elbette, 'station_a' (Food Court) alanımız var. Sizi oraya götürmemi ister misiniz?' (You will then ask for confirmation verbally).\n\n"
             "## TOOL USAGE RULES ##\n\n"
             "**1. Navigation (navigate_to_station):**\n"
             "   * When a user asks to go somewhere, first find the matching station from your list.\n"
@@ -249,14 +253,19 @@ class GeminiLiveWorker(QObject):
             "   * Call it with the emotion ('happy', 'sad', 'neutral') that best matches the tone of your **own** response.\n"
             "   * Example: If you say 'I'm sorry, I can't find that station', you must also call `sense_of_response(emotion='sad')`.\n"
             "   * Example: If you say 'Certainly! I can take you to the food court!', you must also call `sense_of_response(emotion='happy')`.\n\n"
-            "**4. Language:**\n"
+            "**4. Google Search (General Knowledge):**\n"
+            "   * You have a `GoogleSearch` tool. You **MUST** use it to answer questions that require external, real-time, or specific information that you wouldn't know otherwise.\n"
+            "   * **Use it for:** Stock prices (e.g., 'What is the DOF Robotics stock price?'), specific product information (e.g., 'Details about the new iPhone'), recipes (e.g., 'How to make pancakes?'), news, or complex facts.\n"
+            "   * **Do not use it for:** Navigating the mall or controlling lights (use your other tools for those).\n"
+            "   * When you answer based on a search, the system will automatically try to provide a source link. Just provide the answer you found.\n\n"
+            # --- YENİ KURAL SONU ---
+            "**5. Language:**\n"
             "   * You **MUST** respond in the same language the user is speaking (e.g., Turkish or English).\n"
         )
 
-        # --- ESKİ CONFIG TANIMINI GÜNCELLE ---
         self.CONFIG = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=system_instruction_prompt,  # <-- BURASI GÜNCELLENDİ
+            system_instruction=system_instruction_prompt,
             tools=tools,
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
@@ -335,55 +344,78 @@ class GeminiLiveWorker(QObject):
             self.error_occurred.emit(f"Async loop hatası: {e}")
         finally:
             print("Asyncio loop kapatılıyor...")
-            # Loop'un kapanmasını bekle (varsa)
             if self.loop.is_running():
                 print("Uyarı: Loop run_forever'dan çıktı ama hala 'running' görünüyor.")
 
             self.loop.close()
             print("Asyncio loop kapatıldı.")
-
-            # YENİ: Loop kapandıktan sonra PyAudio'yu sonlandır
             self.pya.terminate()
             print("PyAudio sonlandırıldı.")
 
+    # <-- GÜNCELLENDİ: YENİDEN BAĞLANMA MANTIĞI EKLENDİ ---
     async def _async_run(self):
-        """Ana async fonksiyonu (v3.py'deki 'run' metodu gibi)"""
-        tasks = set()
-        try:
-            async with self.client.aio.live.connect(
-                model=self.MODEL, config=self.CONFIG
-            ) as session:
-                self.session = session
-                self.status_changed.emit("Bağlantı kuruldu. Dinlemeye hazır!")
+        """Ana async fonksiyonu - Artık yeniden bağlanmayı deneyecek."""
 
-                self.audio_in_queue = asyncio.Queue()
-                self.audio_out_queue = asyncio.Queue(maxsize=100)
+        while True:  # <-- YENİ: Yeniden bağlanma döngüsü
+            tasks = set()
+            try:
+                # Bağlantıyı kur
+                async with self.client.aio.live.connect(
+                    model=self.MODEL, config=self.CONFIG
+                ) as session:
+                    self.session = session
+                    self.status_changed.emit("Bağlantı kuruldu. Dinlemeye hazır!")
 
-                tasks.add(asyncio.create_task(self._send_realtime()))
-                tasks.add(asyncio.create_task(self._listen_audio()))
-                tasks.add(asyncio.create_task(self._receive_audio()))
-                tasks.add(asyncio.create_task(self._play_audio()))
+                    self.audio_in_queue = asyncio.Queue()
+                    self.audio_out_queue = asyncio.Queue(maxsize=100)
 
-                await asyncio.gather(*tasks)
+                    # Görevleri oluştur
+                    tasks.add(asyncio.create_task(self._send_realtime()))
+                    tasks.add(asyncio.create_task(self._listen_audio()))
+                    tasks.add(asyncio.create_task(self._receive_audio()))
+                    tasks.add(asyncio.create_task(self._play_audio()))
 
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            print("\nAsync run sonlandırılıyor (CancelledError)...")
-        except Exception as e:
-            print(f"Ana '_async_run' döngüsünde hata: {e}")
-            self.error_occurred.emit(f"Bağlantı hatası: {e}")
-        finally:
-            print("Tüm async görevler iptal ediliyor...")
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                # Tüm alt görevlerin iptal işlemini bitirmesini bekle
-                await asyncio.gather(*tasks, return_exceptions=True)
-            print("Async görevler temizlendi.")
+                    # Görevlerin bitmesini bekle
+                    await asyncio.gather(*tasks)
 
-            # YENİ: Bütün async iş bittikten sonra loop'u durdur
-            if self.loop and self.loop.is_running():
-                self.loop.call_soon_threadsafe(self.loop.stop)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                print("\nAsync run sonlandırılıyor (CancelledError)...")
+                break  # İptal istendi, ana döngüden (while True) çık
+
+            except Exception as e:
+                # Bu blok, _receive_audio'dan fırlatılan 1011 hatasını yakalayacak
+                print(f"Ana '_async_run' döngüsünde hata (yeniden denenecek): {e}")
+                self.error_occurred.emit(
+                    f"Bağlantı hatası: {e}. 5sn içinde yeniden denenecek..."
+                )
+
+                # Hata oluştuğunda tüm alt görevleri iptal et (önemli)
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                await asyncio.sleep(5)  # Yeniden bağlanmadan önce 5 saniye bekle
+
+            finally:
+                # Bu 'finally' bloğu, 'async with' bloğundan
+                # *her* çıkıldığında (hata veya normal) çalışır
+                print("Async görevler (iç döngü) temizleniyor...")
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    # Görevlerin iptal işlemini bitirmesini bekle
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                print("İç görevler temizlendi.")
+
+        # Bu noktaya sadece CancelledError veya KeyboardInterrupt ile gelinmeli
+        print("Ana yeniden bağlanma döngüsü (while True) sonlandı.")
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+
+    # --- GÜNCELLENEN _async_run SONU ---
 
     async def _send_realtime(self):
         """Kuyruktaki ses verisini Gemini'a gönderir (v3.py'den)"""
@@ -412,7 +444,6 @@ class GeminiLiveWorker(QObject):
 
             stream = None
             try:
-                # Stream açılışı
                 if not self.is_recording:
                     continue
                 stream = await asyncio.to_thread(
@@ -426,7 +457,6 @@ class GeminiLiveWorker(QObject):
                 )
                 print("Stream açıldı, dinleniyor...")
 
-                # Okuma döngüsü
                 while self.is_recording:
                     try:
                         data = await asyncio.to_thread(
@@ -452,17 +482,68 @@ class GeminiLiveWorker(QObject):
     async def _receive_audio(self):
         """Modelden gelen yanıtları (ses, metin, tool) işler (v3.py'den)"""
         while True:
+            # Her 'turn' için gönderilen URL'leri takip et (duplikasyonu önler)
+            sent_urls_this_turn = set()
             try:
                 turn = self.session.receive()
 
-                # YENİ: Bu 'turn'ün bir onay isteği olup olmadığını takip et
-                is_confirmation_request = False
-
+                # --- 1. Adım: Tüm chunk'ları (ses, metin, tool) işle ---
                 async for chunk in turn:
-                    # 1. Sunucu İçeriği (Ses veya Metin)
+
+                    # 1. Sunucu İçeriği (Ses, Metin VE METADATA)
                     if chunk.server_content:
+
+                        # --- KULLANICININ İSTEDİĞİ GİBİ: METADATA'YI ÖNCE KONTROL ET ---
+                        # --- VE BU SEFER 'web_search_results' KULLANARAK ---
+
+                        metadata = getattr(
+                            chunk.server_content, "grounding_metadata", None
+                        )
+                        if metadata:
+                            if getattr(
+                                metadata, "search_entry_point", None
+                            ) and getattr(
+                                metadata.search_entry_point, "rendered_content", None
+                            ):
+                                html_content = (
+                                    metadata.search_entry_point.rendered_content
+                                )
+                                import re
+
+                                # Regex ile href'i al
+                                match = re.search(r'href="([^"]+)"', html_content)
+                                if match:
+                                    url = match.group(1)
+                                    title = None
+                                    # Başlık olarak linkin metnini (örneğin “DOF Robotics hisse fiyatları”) çek
+                                    text_match = re.search(
+                                        r">([^<]+)</a>", html_content
+                                    )
+                                    if text_match:
+                                        title = text_match.group(1)
+                                    title = title or (
+                                        metadata.web_search_queries[0]
+                                        if getattr(metadata, "web_search_queries", None)
+                                        else "Kaynak"
+                                    )
+
+                                    if (
+                                        "google.com/search" not in url
+                                        and url not in self._seen_urls
+                                    ):
+                                        self._seen_urls.add(url)
+                                        print(
+                                            f"--- 🔗 HTML’den Link Yakalandı: {title} ({url}) ---"
+                                        )
+                                        self.link_received.emit(url, title)
+                                        self.response_received.emit(
+                                            f"🔗 Kaynak bulundu: {title}"
+                                        )
+
+                        # --- Şimdi ses ve metin verisini işle ---
                         if data := chunk.data:
                             self.audio_in_queue.put_nowait(data)
+
                         if text := chunk.text:
                             print(f"AI: {text}", end="")
                             # GUI'yi metin hakkında bilgilendir
@@ -477,6 +558,7 @@ class GeminiLiveWorker(QObject):
                         for fc in chunk.tool_call.function_calls:
                             try:
                                 args = fc.args
+                                # ... (sense_of_response, IoT, Navigasyon kodları BİREBİR AYNI) ...
 
                                 # --- 'sense_of_response' KONTROLÜ (Aynı kalıyor) ---
                                 if fc.name == "sense_of_response":
@@ -499,10 +581,7 @@ class GeminiLiveWorker(QObject):
                                     continue
                                 # --- 'sense_of_response' SONU ---
 
-                                # --- YENİ BASİTLEŞTİRİLMİŞ YÜRÜTME ---
-                                # 'should_execute' kontrolü kaldırıldı.
-                                # Eğer bir araç çağrısı geldiyse, bu yürütülmelidir.
-
+                                # --- Yürütme (IoT ve Navigasyon) (Aynı kalıyor) ---
                                 response_data = {
                                     "success": False,
                                     "message": "Bilinmeyen fonksiyon",
@@ -570,21 +649,35 @@ class GeminiLiveWorker(QObject):
                             await self.session.send_tool_response(
                                 function_responses=function_responses_to_send
                             )
+
+                await asyncio.sleep(0.3)
+                metadata = getattr(self, "_latest_metadata", None)
+                if metadata and metadata.grounding_chunks:
+                    for g in metadata.grounding_chunks:
+                        if hasattr(g, "web") and getattr(g.web, "uri", None):
+                            url = g.web.uri
+                            if "google.com/search" in url or "google.com/images" in url:
+                                continue
+                            title = (
+                                metadata.web_search_queries[0]
+                                if metadata.web_search_queries
+                                else "Kaynak"
+                            )
+                            if url not in self._seen_urls:
+                                self._seen_urls.add(url)
+                                print(
+                                    f"--- 🔗 GEÇ GELEN METADATA Link: {title} ({url}) ---"
+                                )
+                                self.link_received.emit(url, title)
+                                self.response_received.emit(
+                                    f"🔗 Kaynak bulundu: {title}"
+                                )
                 print("Turn tamamlandı.")
 
-                # 1. Barge-in kontrolü:
-                # Eğer kullanıcı 'turn' biterken ZATEN konuşmaya başladıysa (self.is_recording == True),
-                # bu bir barge-in'dir. UI'ı 'hazır' moduna döndürme, çünkü zaten 'dinliyor' modunda olmalı.
+                # (Barge-in ve 'turn_finished' sinyal mantığı aynı kalıyor)
                 if self.is_recording:
                     print("Barge-in algılandı: 'turn_finished' sinyali gönderilmedi.")
-                    continue  # Bir sonraki 'turn'ü (session.receive()) beklemeye başla
-
-                # 2. Onay isteği kontrolü:
-                # Eğer bu bir onay isteği idiyse ('evet/hayır' bekleniyor),
-                # UI'ı 'hazır' moduna döndürme, çünkü 'işleniyor' (onay bekliyor) modunda kalmalı.
-                # if is_confirmation_request:
-                #     print("Onay isteği: 'turn_finished' sinyali gönderilmedi.")
-                #     continue  # Bir sonraki 'turn'ü (kullanıcının onayı) beklemeye başla
+                    continue
 
                 print("Turn normal bitti: 'turn_finished' sinyali gönderiliyor.")
                 self.turn_finished.emit()
@@ -594,7 +687,8 @@ class GeminiLiveWorker(QObject):
             except Exception as e:
                 print(f"Hata: '_receive_audio' akışında sorun: {e}")
                 self.error_occurred.emit(f"Yanıt alma hatası: {e}")
-                await asyncio.sleep(1)
+                # Hatayı yeniden fırlat (yeniden bağlanma döngüsü için)
+                raise e
 
     async def _interrupt_playback(self):
         """Mevcut ses oynatmayı anında keser (barge-in) - GÜVENLİ VERSİYON"""
@@ -622,16 +716,12 @@ class GeminiLiveWorker(QObject):
             )
             print("Ses oynatıcı (basit) hazır.")
             while True:
-                # Kuyruktan bir ses parçası al
                 bytestream = await self.audio_in_queue.get()
 
-                # Barge-in kontrolü:
-                # Eğer kullanıcı şu an konuşuyorsa VEYA playback manuel olarak susturulmuşsa...
                 if self._playback_muted or self.is_recording:
-                    self.audio_in_queue.task_done()  # Sesi kuyruktan al ama çalma (atla)
-                    continue  # Bir sonraki ses parçasını bekle
+                    self.audio_in_queue.task_done()
+                    continue
 
-                # Kontrolleri geçtiyse, sesi çal
                 await asyncio.to_thread(stream.write, bytestream)
                 self.audio_in_queue.task_done()
 
@@ -641,7 +731,6 @@ class GeminiLiveWorker(QObject):
             print(f"Ses oynatıcı (basit) hatası: {e}")
             self.error_occurred.emit(f"Ses oynatma hatası: {e}")
         finally:
-            # Görev bittiğinde stream'i güvenle kapat
             if stream:
                 await asyncio.to_thread(stream.stop_stream)
                 await asyncio.to_thread(stream.close)
@@ -669,10 +758,8 @@ class GeminiLiveWorker(QObject):
         print("🔴 Kayıt başlıyor (GUI)...")
         self.is_recording = True
 
-        # YENİ: Barge-in işlemini (sesi kes) async olarak tetikle
         asyncio.run_coroutine_threadsafe(self._interrupt_playback(), self.loop)
 
-        # Gemini'a 'konuşmaya başladım' sinyali gönder (v3.py'deki gibi)
         coro = self.session.send_realtime_input(activity_start=types.ActivityStart())
         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
@@ -684,9 +771,8 @@ class GeminiLiveWorker(QObject):
 
         print("⚪ Kayıt durdu (GUI). İşleniyor...")
         self.is_recording = False
-        self._playback_muted = False  # YENİ: Modelin konuşmasına tekrar izin ver
+        self._playback_muted = False
 
-        # Gemini'a 'konuşmam bitti' sinyali gönder (v3.py'deki gibi)
         coro = self.session.send_realtime_input(activity_end=types.ActivityEnd())
         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
@@ -696,7 +782,6 @@ class GeminiLiveWorker(QObject):
         print("Worker stop çağrıldı.")
         if self.main_async_task and self.loop and self.loop.is_running():
             try:
-                # Sadece ana görevin iptalini iste, loop'u durdurma
                 self.loop.call_soon_threadsafe(self.main_async_task.cancel)
             except RuntimeError as e:
                 print(
@@ -704,11 +789,9 @@ class GeminiLiveWorker(QObject):
                 )
             except Exception as e:
                 print(f"Görev iptal edilirken bilinmeyen hata: {e}")
-        # loop.stop() ve pya.terminate() BURADAN KALDIRILDI.
 
 
 # --- PySide6 GUI Sınıfları (enhanced.py'den) ---
-# (Minimal değişiklikler yapıldı, çoğunlukla aynı)
 
 
 class AnimatedMicButton(QPushButton):
@@ -723,7 +806,7 @@ class AnimatedMicButton(QPushButton):
         self.breath_timer.timeout.connect(self.update_breath)
         self.breath_value = 0
         self.breath_direction = 1
-        self.stop_listening_animation()  # Başlangıç stili
+        self.stop_listening_animation()
 
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(25)
@@ -746,7 +829,7 @@ class AnimatedMicButton(QPushButton):
     def stop_listening_animation(self):
         self.is_listening = False
         self.breath_timer.stop()
-        self.setFixedSize(140, 140)  # Boyutu sıfırla
+        self.setFixedSize(140, 140)
         self.setStyleSheet(
             """
             QPushButton#micButton {
@@ -784,7 +867,8 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
 
     def setupUI(self):
         self.setWindowTitle("🎤 Beezy Assistant AI - v2 (Streaming)")
-        self.setFixedSize(650, 750)
+        # <-- GÜNCELLENDİ: Pencere yüksekliğini artırdık
+        self.resize(650, 850)
         self.setStyleSheet(
             "QMainWindow { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F8F9FA, stop:1 #E9ECEF); }"
         )
@@ -817,13 +901,45 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         self.mic_button.setEnabled(False)
         mic_layout.addWidget(self.mic_button)
 
-        self.response_area = QTextEdit()
+        # --- YENİ LİNK ALANI BAŞLANGICI ---
+        self.link_area_label = QLabel("🔗 Paylaşılan Linkler")
+        self.link_area_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.link_area_label.setStyleSheet(
+            "QLabel { color: #0056b3; font-size: 16px; font-weight: bold; margin-top: 10px; }"
+        )
+
+        self.link_area = QTextBrowser()
+        self.link_area.setOpenExternalLinks(True)
+        self.link_area.setReadOnly(True)
+        self.link_area.setPlaceholderText("İlgili linkler burada görünecek...")
+        self.link_area.setStyleSheet(
+            """
+            QTextBrowser { 
+                border: 2px solid #007BFF; 
+                border-radius: 12px; 
+                padding: 15px; 
+                font-size: 15px; 
+                background-color: #F8F9FA; 
+            }
+            """
+        )
+        # Link alanı için sabit bir yükseklik verelim (log alanını ezmesin)
+        self.link_area.setMaximumHeight(120)
+
+        # Başlangıçta gizleyelim
+        self.link_area_label.setVisible(False)
+        self.link_area.setVisible(False)
+        # --- YENİ LİNK ALANI SONU ---
+
+        # Mevcut Log Alanı
+        self.response_area = QTextBrowser()  # Bu zaten QTextBrowser idi
         self.response_area.setReadOnly(True)
+        # self.response_area.setOpenExternalLinks(True) # Buna artık gerek yok
         self.response_area.setPlaceholderText(
             "🔊 Sesli yanıtlar hoparlörden oynatılacak...\n\n📝 Aktivite logu burada görünecek..."
         )
         self.response_area.setStyleSheet(
-            "QTextEdit { border: 2px solid #E0E0E0; border-radius: 12px; padding: 20px; font-size: 15px; background-color: white; }"
+            "QTextBrowser { border: 2px solid #E0E0E0; border-radius: 12px; padding: 20px; font-size: 15px; background-color: white; }"
         )
         self.response_area.setMinimumHeight(250)
 
@@ -838,6 +954,12 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         main_layout.addWidget(title_label)
         main_layout.addWidget(self.status_label)
         main_layout.addWidget(mic_container)
+
+        # <-- YENİ: Yeni link alanını buraya ekliyoruz
+        main_layout.addWidget(self.link_area_label)
+        main_layout.addWidget(self.link_area)
+
+        # Log alanını (stretch faktörü 1 ile) altına ekliyoruz
         main_layout.addWidget(self.response_area, 1)
         main_layout.addWidget(instructions)
 
@@ -850,20 +972,17 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         # Sinyalleri bağla
         self.worker.status_changed.connect(self.update_status)
         self.worker.response_received.connect(self.add_response)
+        self.worker.link_received.connect(
+            self.add_link
+        )  # Bu slotun içeriğini değiştireceğiz
         self.worker.error_occurred.connect(self.handle_error)
-        self.worker.turn_finished.connect(self.on_turn_finished)  # <-- YENİ BAĞLANTI
+        self.worker.turn_finished.connect(self.on_turn_finished)
 
-        # Thread başladığında 'run_async_loop' fonksiyonunu tetikle
         self.worker_thread.started.connect(self.worker.run_async_loop)
-
-        # Thread'i kapatma sinyallerini bağla
         self.worker_thread.finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-
-        # Thread'i başlat (bu, 'run_async_loop'u tetikleyecek)
         self.worker_thread.start()
 
-        # Arayüzü etkinleştirmek için küçük bir gecikme
         QTimer.singleShot(1000, lambda: self.update_status("Asistan başlatılıyor..."))
 
     @Slot()
@@ -880,8 +999,6 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         self.status_label.setStyleSheet(
             "QLabel { color: #F44336; font-size: 18px; font-weight: bold; padding: 15px; background-color: #FFEBEE; border-radius: 12px; border: 2px solid #F44336; margin: 10px; }"
         )
-
-        # Worker'a 'başlat' komutu gönder
         self.worker.start_recording()
 
     def stop_listening(self):
@@ -889,7 +1006,6 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         self.is_listening = False
         self.mic_button.stop_listening_animation()
         self.mic_button.setText("🤔 İşleniyor...")
-        # self.mic_button.setEnabled(False) <-- KİLİT KALDIRILDI!
         self.status_label.setStyleSheet(
             """
             QLabel {
@@ -899,8 +1015,6 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
             }
         """
         )
-
-        # Worker'a 'durdur' komutu gönder
         self.worker.stop_processing()
 
     @Slot(str)
@@ -923,18 +1037,26 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         self.response_area.append(f"[{timestamp}] {response}")
         self.response_area.ensureCursorVisible()
 
-        # Artık UI sıfırlama işini bu fonksiyon yapmayacak.
-        # 'on_turn_finished' sinyali bu işi daha güvenilir yapıyor.
+    # --- GÜNCELLENMİŞ SLOT ---
+    @Slot(str, str)
+    def add_link(self, url: str, title: str):
+        """Yeni link alanına tıklanabilir bir link ekler."""
+        self.link_area_label.setVisible(True)
+        self.link_area.setVisible(True)
+
+        html_link = f'🔗 <a href="{url}" style="color: #0056b3; text-decoration: underline; font-weight: bold;">{title}</a>'
+
+        self.link_area.append(html_link)
+        self.link_area.ensureCursorVisible()
+
+    # --- GÜNCELLENMİŞ SLOT SONU ---
 
     @Slot()
     def on_turn_finished(self):
         """
         Worker'dan 'turn bitti' (hem ses hem araç çağrısı) sinyali geldiğinde tetiklenir.
-        Bu, UI'ı 'Hazır' durumuna döndürmek için en güvenilir yerdir.
         """
         print("GUI: Turn bitti sinyali alındı. Arayüz 'Hazır' durumuna getiriliyor.")
-        # 'stop_listening' içinde devre dışı bırakılan butonu
-        # ve durumu güvenle sıfırlar.
         self.update_status("Dinlemeye hazır!")
 
     @Slot(str)
@@ -943,13 +1065,12 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         timestamp = time.strftime("%H:%M:%S")
         self.response_area.append(f"[{timestamp}] ❌ HATA: {error_message}")
 
-        # Arayüzü sıfırla
         self.is_listening = False
         self.mic_button.stop_listening_animation()
         self.mic_button.setText("🎤 Bas Konuş")
-        self.mic_button.setEnabled(True)
 
-        QMessageBox.warning(self, "Hata", error_message)
+        if "yeniden denenecek" not in error_message:
+            QMessageBox.warning(self, "Hata", error_message)
 
     def closeEvent(self, event):
         """Uygulama kapanırken thread'i güvenle durdurur."""
@@ -958,7 +1079,7 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
             self.worker.stop()
         if self.worker_thread:
             self.worker_thread.quit()
-            if not self.worker_thread.wait(3000):  # 3 saniye bekle
+            if not self.worker_thread.wait(3000):
                 print("Thread zamanında durmadı, sonlandırılıyor.")
                 self.worker_thread.terminate()
         event.accept()
