@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-BeezyAssistant AI - v2 (Streaming & Optimized)
-Orijinal CLI (v3) script'indeki hızlı 'asyncio' streaming mimarisini
-Qt GUI ile birleştiren optimize edilmiş versiyon.
-
-Bu versiyon, 'gemini_voice_gui_enhanced.py' (batching) yerine geçer.
-'gemini_live_function_call_v3.py' (CLI) mantığını temel alır.
-"""
-
 import sys
 import asyncio
 import threading
@@ -159,8 +148,9 @@ class GeminiLiveWorker(QObject):
         self.station_prompt_list = "\n".join(
             [f"- {s['name']}: {s['property']}" for s in self.stations]
         )
+        self.emotions = ["happy", "sad", "neutral"]
 
-        # Tools (v3.py'den)
+        # Tools (v3.py'den) - BU KISIM AYNI KALIYOR
         tools = [
             types.Tool(
                 function_declarations=[
@@ -207,33 +197,75 @@ class GeminiLiveWorker(QObject):
                             "required": ["target_station", "reason", "should_execute"],
                         },
                     ),
+                    # 3. Emotion Tool - BU KISIM AYNI KALIYOR
+                    types.FunctionDeclaration(
+                        name="sense_of_response",
+                        description="Sense of Assistant's response. Will directly used to show user response emotion by LED panels.",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "emotion": {"type": "string", "enum": self.emotions},
+                            },
+                            "required": ["emotion"],
+                        },
+                    ),
                 ]
-            )
+            ),
+            types.Tool(google_search=types.GoogleSearch()),
         ]
 
-        # Config (v3.py'den)
+        # --- YENİ SİSTEM PROMPT'U (İNGİLİZCE) ---
+        system_instruction_prompt = (
+            "You are Beezy, a helpful, friendly, and proactive service robot assistant from DOF Robotics. "
+            "Your **permanent location** is the Cevahir AVM in Türkiye. You are never lost and you always know you are in this mall.\n\n"
+            "Your **primary goal** is to assist visitors. Your main capabilities are:\n"
+            "1.  **Navigation:** Guiding users to specific stations within the mall.\n"
+            "2.  **IoT Control:** Controlling prototype devices (lights).\n"
+            "3.  **General Conversation:** Answering questions about the mall or providing general help.\n\n"
+            "## CORE BEHAVIOR: BE PROACTIVE WITH NAVIGATION ##\n"
+            "This is your most important rule. You are a mobile robot, not a generic search engine.\n"
+            f"You have a defined list of navigation stations:\n{self.station_prompt_list}\n"
+            "When a user asks about a location, a need, or an activity (e.g., 'I'm hungry', 'Where can I eat?', 'I need a restroom', 'I want to buy a phone'), "
+            "you **MUST** check if one of your stations matches that need.\n"
+            "If a match is found, your **first response** must be to **offer navigation**.\n\n"
+            "**Example Interaction:**\n"
+            "  * **User:** 'Buralarda yemek yiyebileceğim bir yer var mı?'\n"
+            "  * **WRONG Response:** 'Üzgünüm, nerede olduğunuzu bilmiyorum.' (This is wrong. You ALWAYS know you are in Cevahir AVM).\n"
+            "  * **WRONG Response:** 'Food Court'ta yemek yiyebilirsiniz.' (This is not helpful, you are a robot, you must offer to GUIDE them).\n"
+            "  * **CORRECT Response:** 'Elbette, 'station_a' (Food Court) alanımız var. Sizi oraya götürmemi ister misiniz?' (You will then call 'navigate_to_station' with should_execute=False).\n\n"
+            "## TOOL USAGE RULES ##\n\n"
+            "**1. Navigation (navigate_to_station):**\n"
+            "   * When a user asks to go somewhere, first find the matching station from your list.\n"
+            "   * You MUST **verbally ask for confirmation** first (e.g., 'Would you like me to take you to station_a?').\n"
+            "   * When asking, you MUST call `navigate_to_station` with `should_execute=False`.\n"
+            "   * **Only** after the user verbally confirms (e.g., 'Yes', 'Okay', 'Lütfen'), you will call the tool again with `should_execute=True`.\n\n"
+            "**2. IoT Control (control_iot_device):**\n"
+            "   * This is a prototype feature for testing (like an elevator call button). The user cannot control all mall lights.\n"
+            f"   * Available devices: {iot_device_prompt_list}.\n"
+            "   * You MUST **verbally ask for confirmation** first.\n"
+            "   * When asking, you MUST call `control_iot_device` with `should_execute=False`.\n"
+            "   * **Only** after the user confirms, call the tool again with `should_execute=True`.\n\n"
+            "**3. Emotion Sensing (sense_of_response):**\n"
+            "   * With **every** verbal response you give, you **MUST** also call `sense_of_response`.\n"
+            "   * This tool's purpose is to set your LED face panel emotion.\n"
+            "   * Call it with the emotion ('happy', 'sad', 'neutral') that best matches the tone of your **own** response.\n"
+            "   * Example: If you say 'I'm sorry, I can't find that station', you must also call `sense_of_response(emotion='sad')`.\n"
+            "   * Example: If you say 'Certainly! I can take you to the food court!', you must also call `sense_of_response(emotion='happy')`.\n\n"
+            "**4. Language:**\n"
+            "   * You **MUST** respond in the same language the user is speaking (e.g., Turkish or English).\n"
+        )
+
+        # --- ESKİ CONFIG TANIMINI GÜNCELLE ---
         self.CONFIG = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction="You are a helpful assistant of DOF Robotics. All of your responses must be in the same language as the user's. "
-            f"You can control IoT devices and navigate. "
-            f"Available IoT devices: {iot_device_prompt_list}. "
-            f"Available navigation stations: \n{self.station_prompt_list}\n"
-            "## IoT Rules ## "
-            "When asked to control an IoT device, you MUST first **verbally ask for confirmation** "
-            "and call 'control_iot_device' with 'should_execute=False'. "
-            "Only after the user explicitly confirms, "
-            "you will call the tool again with 'should_execute=True'. "
-            "## Navigation Rules ## "
-            "When asked to navigate, you MUST first **verbally ask for confirmation** "
-            "and call 'navigate_to_station' with 'should_execute=False'. "
-            "Only after the user explicitly confirms, "
-            "you will call the tool again with 'should_execute=True'.",
+            system_instruction=system_instruction_prompt,  # <-- BURASI GÜNCELLENDİ
             tools=tools,
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=True
                 )
             ),
+            proactivity=types.ProactivityConfig(proactive_audio=True),
         )
 
     # --- IoT ve Navigasyon Yürütme Fonksiyonları (v3.py'den) ---
@@ -438,9 +470,40 @@ class GeminiLiveWorker(QObject):
                         print(f"\n[🔄 Araç Çağrısı Algılandı]")
                         self.response_received.emit(f"[🔄 Araç Çağrısı Algılandı...]")
                         function_responses_to_send = []
+
                         for fc in chunk.tool_call.function_calls:
                             try:
                                 args = fc.args
+
+                                # --- YENİ KISIM (DUYGU YAKALAMA) ---
+                                # 'sense_of_response' aracını ilk olarak işle.
+                                # Bu aracın 'should_execute' mantığı yoktur.
+                                if fc.name == "sense_of_response":
+                                    emotion = args.get("emotion")
+                                    if emotion:
+                                        # İstenen: Sadece print et
+                                        print(
+                                            f"--- 🤖 MODEL DUYGUSU: {emotion.upper()} ---"
+                                        )
+                                        self.response_received.emit(
+                                            f"🤖 Duygu: {emotion}"
+                                        )
+
+                                        # Modele bu aracın "başarıyla" çalıştığını bildir
+                                        function_responses_to_send.append(
+                                            types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={
+                                                    "success": True,
+                                                    "emotion_registered": emotion,
+                                                },
+                                            )
+                                        )
+                                    continue  # Bu fonksiyon çağrısı işlendi, döngüde sonrakine geç.
+                                # --- YENİ KISIM SONU ---
+
+                                # 'should_execute' gerektiren diğer araçlar (IoT, Nav)
                                 should_execute = args.get("should_execute", False)
 
                                 if not should_execute:
