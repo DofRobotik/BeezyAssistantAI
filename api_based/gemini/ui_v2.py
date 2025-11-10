@@ -170,13 +170,11 @@ class GeminiLiveWorker(QObject):
                                     "enum": ["turn_on", "turn_off"],
                                 },
                                 "reason": {"type": "string"},
-                                "should_execute": {"type": "boolean"},
                             },
                             "required": [
                                 "target_device_code",
                                 "action",
                                 "reason",
-                                "should_execute",
                             ],
                         },
                     ),
@@ -192,9 +190,8 @@ class GeminiLiveWorker(QObject):
                                     "enum": self.station_names,
                                 },
                                 "reason": {"type": "string"},
-                                "should_execute": {"type": "boolean"},
                             },
-                            "required": ["target_station", "reason", "should_execute"],
+                            "required": ["target_station", "reason"],
                         },
                     ),
                     # 3. Emotion Tool - BU KISIM AYNI KALIYOR
@@ -236,15 +233,16 @@ class GeminiLiveWorker(QObject):
             "## TOOL USAGE RULES ##\n\n"
             "**1. Navigation (navigate_to_station):**\n"
             "   * When a user asks to go somewhere, first find the matching station from your list.\n"
-            "   * You MUST **verbally ask for confirmation** first (e.g., 'Would you like me to take you to station_a?').\n"
-            "   * When asking, you MUST call `navigate_to_station` with `should_execute=False`.\n"
-            "   * **Only** after the user verbally confirms (e.g., 'Yes', 'Okay', 'Lütfen'), you will call the tool again with `should_execute=True`.\n\n"
+            "   * You MUST **verbally ask for confirmation** first (e.g., 'I see our 'station_a' matches that need. Would you like me to take you there?').\n"
+            "   * **DO NOT** call the `Maps_to_station` tool when you are asking. Just ask the question verbally.\n"
+            "   * **Wait for the user's response.**\n"
+            "   * If the user verbally confirms (e.g., 'Yes', 'Okay', 'Lütfen'), **THEN** you will call the `Maps_to_station` tool (in your next turn) to execute the action.\n\n"
             "**2. IoT Control (control_iot_device):**\n"
-            "   * This is a prototype feature for testing (like an elevator call button). The user cannot control all mall lights.\n"
-            f"   * Available devices: {iot_device_prompt_list}.\n"
-            "   * You MUST **verbally ask for confirmation** first.\n"
-            "   * When asking, you MUST call `control_iot_device` with `should_execute=False`.\n"
-            "   * **Only** after the user confirms, call the tool again with `should_execute=True`.\n\n"
+            f"   * This is a prototype feature. Available devices: {iot_device_prompt_list}.\n"
+            "   * You MUST **verbally ask for confirmation** first (e.g., 'Should I turn on the light LOUNGE_GENEL?').\n"
+            "   * **DO NOT** call the `control_iot_device` tool when you are asking.\n"
+            "   * **Wait for the user's response.**\n"
+            "   * If the user confirms, **THEN** you will call the `control_iot_device` tool to execute the action.\n\n"
             "**3. Emotion Sensing (sense_of_response):**\n"
             "   * With **every** verbal response you give, you **MUST** also call `sense_of_response`.\n"
             "   * This tool's purpose is to set your LED face panel emotion.\n"
@@ -475,21 +473,14 @@ class GeminiLiveWorker(QObject):
                             try:
                                 args = fc.args
 
-                                # --- YENİ KISIM (DUYGU YAKALAMA) ---
-                                # 'sense_of_response' aracını ilk olarak işle.
-                                # Bu aracın 'should_execute' mantığı yoktur.
+                                # --- 'sense_of_response' KONTROLÜ (Aynı kalıyor) ---
                                 if fc.name == "sense_of_response":
                                     emotion = args.get("emotion")
                                     if emotion:
-                                        # İstenen: Sadece print et
-                                        print(
-                                            f"--- 🤖 MODEL DUYGUSU: {emotion.upper()} ---"
-                                        )
+                                        print(f"--- 🤖 MODEL DUYGUSU: {emotion} ---")
                                         self.response_received.emit(
                                             f"🤖 Duygu: {emotion}"
                                         )
-
-                                        # Modele bu aracın "başarıyla" çalıştığını bildir
                                         function_responses_to_send.append(
                                             types.FunctionResponse(
                                                 id=fc.id,
@@ -500,21 +491,12 @@ class GeminiLiveWorker(QObject):
                                                 },
                                             )
                                         )
-                                    continue  # Bu fonksiyon çağrısı işlendi, döngüde sonrakine geç.
-                                # --- YENİ KISIM SONU ---
-
-                                # 'should_execute' gerektiren diğer araçlar (IoT, Nav)
-                                should_execute = args.get("should_execute", False)
-
-                                if not should_execute:
-                                    print(f"❓ Model '{fc.name}' için onay istiyor.")
-                                    self.response_received.emit(
-                                        f"❓ Model '{fc.name}' için onay istiyor."
-                                    )
-                                    is_confirmation_request = (
-                                        True  # <-- YENİ: Onay istediğini işaretle
-                                    )
                                     continue
+                                # --- 'sense_of_response' SONU ---
+
+                                # --- YENİ BASİTLEŞTİRİLMİŞ YÜRÜTME ---
+                                # 'should_execute' kontrolü kaldırıldı.
+                                # Eğer bir araç çağrısı geldiyse, bu yürütülmelidir.
 
                                 response_data = {
                                     "success": False,
@@ -525,9 +507,7 @@ class GeminiLiveWorker(QObject):
                                 if fc.name == "control_iot_device":
                                     target = args.get("target_device_code")
                                     action = args.get("action")
-                                    print(
-                                        f"✅ Onay alındı. IoT: {target} '{action}' yürütülüyor..."
-                                    )
+                                    print(f"✅ IoT: {target} '{action}' yürütülüyor...")
                                     self.response_received.emit(
                                         f"✅ IoT: {target} '{action}' yürütülüyor..."
                                     )
@@ -543,7 +523,7 @@ class GeminiLiveWorker(QObject):
                                 elif fc.name == "navigate_to_station":
                                     target = args.get("target_station")
                                     print(
-                                        f"✅ Onay alındı. Navigasyon: {target} hedefine yönlendiriliyor..."
+                                        f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
                                     )
                                     self.response_received.emit(
                                         f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
@@ -566,6 +546,7 @@ class GeminiLiveWorker(QObject):
                                     )
                                 )
                             except Exception as e:
+                                # (Hata yönetimi aynı kalıyor)
                                 print(f"❌ Fonksiyon işleme hatası: {e}")
                                 self.error_occurred.emit(f"Fonksiyon hatası: {e}")
                                 function_responses_to_send.append(
@@ -576,6 +557,7 @@ class GeminiLiveWorker(QObject):
                                     )
                                 )
 
+                        # (Fonksiyon yanıtı gönderme kısmı aynı kalıyor)
                         if function_responses_to_send:
                             print(
                                 f"[📬 {len(function_responses_to_send)} adet fonksiyon yanıtı gönderiliyor...]"
@@ -584,8 +566,6 @@ class GeminiLiveWorker(QObject):
                                 function_responses=function_responses_to_send
                             )
                 print("Turn tamamlandı.")
-
-                # YENİ (GÜNCELLENDİ): UI'ı 'hazır' durumuna döndürme mantığı
 
                 # 1. Barge-in kontrolü:
                 # Eğer kullanıcı 'turn' biterken ZATEN konuşmaya başladıysa (self.is_recording == True),
@@ -597,13 +577,10 @@ class GeminiLiveWorker(QObject):
                 # 2. Onay isteği kontrolü:
                 # Eğer bu bir onay isteği idiyse ('evet/hayır' bekleniyor),
                 # UI'ı 'hazır' moduna döndürme, çünkü 'işleniyor' (onay bekliyor) modunda kalmalı.
-                if is_confirmation_request:
-                    print("Onay isteği: 'turn_finished' sinyali gönderilmedi.")
-                    continue  # Bir sonraki 'turn'ü (kullanıcının onayı) beklemeye başla
+                # if is_confirmation_request:
+                #     print("Onay isteği: 'turn_finished' sinyali gönderilmedi.")
+                #     continue  # Bir sonraki 'turn'ü (kullanıcının onayı) beklemeye başla
 
-                # 3. Normal bitiş:
-                # Turn normal bittiyse (barge-in yok, onay isteği yok),
-                # UI'ı 'hazır' durumuna döndürmek için sinyal gönder.
                 print("Turn normal bitti: 'turn_finished' sinyali gönderiliyor.")
                 self.turn_finished.emit()
 
