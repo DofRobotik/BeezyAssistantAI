@@ -7,6 +7,7 @@ import json
 import traceback
 import queue  # Sadece asyncio thread-safe olmayan GUI iletişimi için
 from typing import Optional, Tuple
+import re
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -94,6 +95,7 @@ class GeminiLiveWorker(QObject):
         self.pya = pyaudio.PyAudio()
         self._seen_urls = set()
         self._latest_metadata = None
+        self._pending_confirmation = {}
 
         # Gemini Client
         try:
@@ -245,9 +247,9 @@ class GeminiLiveWorker(QObject):
             "## TOOL USAGE RULES ##\n\n"
             "**1. Navigation(navigate_to_station)**"
             "CRITICAL TWO-STEP PROCESS:"
-            "Step 1 (Ask): First, just ask the user for confirmation (e.g., 'I can guide you to station_a. Would you like that?'). In this turn, you MUST NOT call any tool."
-            "Step 2 (Wait & Act): Wait for the user's next response. If they say 'yes' (or similar), THEN, in that new turn, you must both verbally confirm (e.g., 'Okay, navigating to station_a') AND call the navigate_to_to_station tool."
-            "ANTI-HALLUCINATION RULE: Do not just say you are performing an action. If you state 'I am navigating...' or 'I am turning on the light...', you MUST accompany that statement with the corresponding tool_call. Stating the action without the tool call is a failure."
+            "On first tool call, the environment will NOT execute anything and will return needs_confirmation=true."
+            "When you see needs_confirmation=true, you MUST ask the user clearly for confirmation (yes/no) and wait."
+            "If the user agrees, call the SAME tool again with the SAME arguments. The environment will then execute it and return needs_confirmation=false and success=true/false."
             "**2. IoT Control (control_iot_device):**\n"
             f"   * This is a prototype feature. Available devices: {iot_device_prompt_list}.\n"
             "   * You MUST **verbally ask for confirmation** first (e.g., 'Should I turn on the light LOUNGE_GENEL?').\n"
@@ -564,8 +566,41 @@ class GeminiLiveWorker(QObject):
                                             )
 
                             # --- 'search_entry_point' Kullanan ESKİ BLOK KALDIRILDI ---
-                            # Sizin de belirttiğiniz gibi bu blok, arama sorgu linkini
-                            # (örn: vertexaisearch.cloud.google.com/...) getiriyordu.
+                            if not chunks_to_check:
+                                search_entry = getattr(
+                                    metadata, "search_entry_point", None
+                                )
+                                rendered = (
+                                    getattr(search_entry, "rendered_content", None)
+                                    if search_entry
+                                    else None
+                                )
+
+                                if rendered:
+                                    # Çok basit bir href yakalama
+                                    urls = re.findall(
+                                        r'href="(https?://[^"]+)"', rendered
+                                    )
+                                    for url in urls:
+                                        # Aynı turn içinde ve globalde tekrarlama
+                                        if (
+                                            url in self._seen_urls
+                                            or url in sent_urls_this_turn
+                                        ):
+                                            continue
+
+                                        # İstersen Google arama sayfasını da artık gösterebilirsin,
+                                        # ya da burada yine filtre koyabilirsin.
+                                        title = "Search result"
+                                        print(
+                                            f"--- 🔗 search_entry_point'ten Link: {title} ({url}) ---"
+                                        )
+                                        self._seen_urls.add(url)
+                                        sent_urls_this_turn.add(url)
+                                        self.link_received.emit(url, title)
+                                        self.response_received.emit(
+                                            f"🔗 Kaynak bulundu: {title}"
+                                        )
 
                         # --- Şimdi ses ve metin verisini işle (Bu kısım aynı kaldı) ---
                         if data := chunk.data:
@@ -608,44 +643,94 @@ class GeminiLiveWorker(QObject):
                                     continue
                                 # --- 'sense_of_response' SONU ---
 
-                                # --- Yürütme (IoT ve Navigasyon) (Aynı kalıyor) ---
+                                # --- Yürütme (IoT ve Navigasyon) (v4: İki aşamalı onay) ---
                                 response_data = {
                                     "success": False,
                                     "message": "Bilinmeyen fonksiyon",
                                 }
 
-                                # Durum 1: IoT
+                                # Durum 1: IoT (control_iot_device)
                                 if fc.name == "control_iot_device":
                                     target = args.get("target_device_code")
                                     action = args.get("action")
-                                    print(f"✅ IoT: {target} '{action}' yürütülüyor...")
-                                    self.response_received.emit(
-                                        f"✅ IoT: {target} '{action}' yürütülüyor..."
-                                    )
-                                    success, message = await asyncio.to_thread(
-                                        self.execute_iot_command, target, action
-                                    )
-                                    response_data = {
-                                        "success": success,
-                                        "message": message,
-                                    }
+                                    key = ("control_iot_device", target, action)
 
-                                # Durum 2: Navigasyon
+                                    # İlk çağrı: sadece onay iste, gerçek komutu KOŞTURMA
+                                    if not self._pending_confirmation.get(key):
+                                        self._pending_confirmation[key] = True
+                                        msg = (
+                                            f"IoT aksiyonu için onay gerekiyor: "
+                                            f"{target} cihazına '{action}' komutu."
+                                        )
+                                        print(f"⚠️ {msg}")
+                                        self.response_received.emit(f"⚠️ {msg}")
+                                        response_data = {
+                                            "success": False,
+                                            "message": "Confirmation required before executing IoT action.",
+                                            "needs_confirmation": True,
+                                            "target_device_code": target,
+                                            "action": action,
+                                        }
+
+                                    # İkinci çağrı: gerçekten çalıştır
+                                    else:
+                                        self._pending_confirmation.pop(key, None)
+                                        print(
+                                            f"✅ IoT: {target} için '{action}' KOMUTU ÇALIŞTIRILIYOR..."
+                                        )
+                                        self.response_received.emit(
+                                            f"✅ IoT: {target} için '{action}' komutu çalıştırılıyor..."
+                                        )
+                                        success, message = await asyncio.to_thread(
+                                            self.execute_iot_command, target, action
+                                        )
+                                        response_data = {
+                                            "success": success,
+                                            "message": message,
+                                            "needs_confirmation": False,
+                                            "target_device_code": target,
+                                            "action": action,
+                                        }
+
+                                # Durum 2: Navigasyon (navigate_to_station)
                                 elif fc.name == "navigate_to_station":
                                     target = args.get("target_station")
-                                    print(
-                                        f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
-                                    )
-                                    self.response_received.emit(
-                                        f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
-                                    )
-                                    success, message = await asyncio.to_thread(
-                                        self.execute_navigation_command, target
-                                    )
-                                    response_data = {
-                                        "success": success,
-                                        "message": message,
-                                    }
+                                    key = ("navigate_to_station", target)
+
+                                    # İlk çağrı: sadece onay iste
+                                    if not self._pending_confirmation.get(key):
+                                        self._pending_confirmation[key] = True
+                                        msg = (
+                                            f"Navigasyon için onay gerekiyor: "
+                                            f"'{target}' hedefine gitmemi istiyor musunuz?"
+                                        )
+                                        print(f"⚠️ {msg}")
+                                        self.response_received.emit(f"⚠️ {msg}")
+                                        response_data = {
+                                            "success": False,
+                                            "message": "Confirmation required before navigation.",
+                                            "needs_confirmation": True,
+                                            "target_station": target,
+                                        }
+
+                                    # İkinci çağrı: gerçekten ROS endpoint'ine gönder
+                                    else:
+                                        self._pending_confirmation.pop(key, None)
+                                        print(
+                                            f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
+                                        )
+                                        self.response_received.emit(
+                                            f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
+                                        )
+                                        success, message = await asyncio.to_thread(
+                                            self.execute_navigation_command, target
+                                        )
+                                        response_data = {
+                                            "success": success,
+                                            "message": message,
+                                            "needs_confirmation": False,
+                                            "target_station": target,
+                                        }
 
                                 # --- Yürütme Bitti ---
                                 self.response_received.emit(
