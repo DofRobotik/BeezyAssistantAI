@@ -215,7 +215,8 @@ tools = [
                 },
             ),
         ]
-    )
+    ),
+    types.Tool(types.GoogleSearch()),
 ]
 turn_detection_cfg = None
 try:

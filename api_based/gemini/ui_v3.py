@@ -259,20 +259,20 @@ class GeminiLiveWorker(QObject):
             "   * Call it with the emotion ('happy', 'sad') that best matches the tone of your **own** response. If not matches you don't have to call this tool.\n"
             "   * Example: If you say 'I'm sorry, I can't find that station', you must also call `sense_of_response(emotion='sad')`.\n"
             "   * Example: If you say 'Certainly! I can take you to the food court!', you must also call `sense_of_response(emotion='happy')`.\n\n"
-            "**4. Providing Web Resources (Using Google Search):**\n"
-            "   * You have the `Google Search` tool. Your UI (the app) has a special area to display links.\n"
-            "   * If a user asks for a specific resource (e.g., 'show me a video', 'find a recipe', 'I need a link for...', 'can you find a YouTube video?'), your goal is to **find that resource and provide the link**.\n"
-            "   * **DO NOT** refuse by saying 'I cannot show videos' or 'I cannot display websites.' You are not *displaying* it, you are *providing the link* to the UI, which can handle it.\n"
-            "   * When you find a resource, the API will automatically send the link (via `grounding_chunks`) to the UI, where the user can see it.\n"
-            "   * **Your job is to find the resource and verbally confirm you are providing the link.**\n\n"
-            "   * **Example Interaction:**\n"
-            "     * **User:** 'Bana pankek tarifi için bir YouTube videosu bulabilir misin?'\n"
-            "     * **WRONG Response:** 'Üzgünüm, video gösteremem.' (This is wrong. You MUST find a link.)\n"
-            "     * **CORRECT Response:** 'Elbette, [Video Adı] için bir YouTube linki buldum. Arayüzde paylaşıyorum.' (The API will then send the `grounding_chunk` link automatically).\n\n"
+            # "**4. Providing Web Resources (Using Google Search):**\n"
+            # "   * You have the `Google Search` tool. Your UI (the app) has a special area to display links.\n"
+            # "   * If a user asks for a specific resource (e.g., 'show me a video', 'find a recipe', 'I need a link for...', 'can you find a YouTube video?'), your goal is to **find that resource and provide the link**.\n"
+            # "   * **DO NOT** refuse by saying 'I cannot show videos' or 'I cannot display websites.' You are not *displaying* it, you are *providing the link* to the UI, which can handle it.\n"
+            # "   * When you find a resource, the API will automatically send the link (via `grounding_chunks`) to the UI, where the user can see it.\n"
+            # "   * **Your job is to find the resource and verbally confirm you are providing the link.**\n\n"
+            # "   * **Example Interaction:**\n"
+            # "     * **User:** 'Bana pankek tarifi için bir YouTube videosu bulabilir misin?'\n"
+            # "     * **WRONG Response:** 'Üzgünüm, video gösteremem.' (This is wrong. You MUST find a link.)\n"
+            # "     * **CORRECT Response:** 'Elbette, [Video Adı] için bir YouTube linki buldum. Arayüzde paylaşıyorum.' (The API will then send the `grounding_chunk` link automatically).\n\n"
             # --- YENİ KURALIN SONU ---
             #
             # (Eski 4. kuralı 5. olarak yeniden numaralandırın)
-            "**5. Language:**\n"
+            "**4. Language:**\n"
             "   * You **MUST** respond in the same language the user is speaking (e.g., Turkish or English).\n"
             ")"
             # (Değişkenin sonu)
@@ -287,12 +287,12 @@ class GeminiLiveWorker(QObject):
                     disabled=True
                 )
             ),
-            # proactivity=types.ProactivityConfig(proactive_audio=True),
-            # context_window_compression=(
-            #    types.ContextWindowCompressionConfig(
-            #        sliding_window=types.SlidingWindow()
-            #    )
-            # ),
+            proactivity=types.ProactivityConfig(proactive_audio=True),
+            context_window_compression=(
+                types.ContextWindowCompressionConfig(
+                    sliding_window=types.SlidingWindow()
+                )
+            ),
             thinking_config=types.ThinkingConfig(thinking_budget=1024),
         )
 
@@ -511,11 +511,13 @@ class GeminiLiveWorker(QObject):
                     if chunk.server_content:
 
                         # --- GÜNCELLENMİŞ LİNK YAKALAMA MANTIĞI ---
-                        metadata = getattr(
+                        metadata: types.GroundingMetadata = getattr(
                             chunk.server_content, "grounding_metadata", None
                         )
                         if metadata:
-
+                            print("*" * 20)
+                            print(metadata)
+                            print("*" * 20)
                             # Asıl kaynak linkleri 'grounding_chunks' içindedir.
                             chunks_to_check = getattr(metadata, "grounding_chunks", [])
 

@@ -8,8 +8,9 @@ import traceback
 import queue  # Sadece asyncio thread-safe olmayan GUI iletişimi için
 from typing import Optional, Tuple
 import re
+from urllib.parse import urlparse, parse_qs
 
-from PySide6.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
@@ -22,21 +23,24 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QTextBrowser,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QObject, QUrl
-from PySide6.QtGui import QFont, QColor
-
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEngineProfile
-except ImportError:
-    print("HATA: PySide6-WebEngine kütüphanesi bulunamadı.")
-    print("Lütfen 'pip install PySide6-WebEngine' komutu ile yükleyin.")
-    sys.exit()
+from PyQt6.QtCore import (
+    Qt,
+    QTimer,
+    pyqtSignal as Signal,
+    pyqtSlot as Slot,
+    QThread,
+    QObject,
+    QUrl,
+)
+from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEngineProfile
 
 # Gerekli modüllerin import edilmesi
 import pyaudio
 from google import genai
 from google.genai import types
+from googleapiclient.discovery import build
 from dotenv import load_dotenv
 import requests
 
@@ -93,9 +97,7 @@ class GeminiLiveWorker(QObject):
 
         # PyAudio
         self.pya = pyaudio.PyAudio()
-        self._seen_urls = set()
         self._latest_metadata = None
-        self._pending_confirmation = {}
 
         # Gemini Client
         try:
@@ -220,6 +222,20 @@ class GeminiLiveWorker(QObject):
                             "required": ["emotion"],
                         },
                     ),
+                    types.FunctionDeclaration(
+                        name="find_youtube_video",
+                        description="Searches YouTube for a specific video query and prepares it for display.",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "search_query": {
+                                    "type": "string",
+                                    "description": "The search query, e.g., 'pancake recipe' or 'latest tech news'",
+                                },
+                            },
+                            "required": ["search_query"],
+                        },
+                    ),
                 ]
             ),
             types.Tool(google_search=types.GoogleSearch()),
@@ -232,49 +248,62 @@ class GeminiLiveWorker(QObject):
             "Your **primary goal** is to assist visitors. Your main capabilities are:\n"
             "1.  **Navigation:** Guiding users to specific stations within the mall.\n"
             "2.  **IoT Control:** Controlling prototype devices (lights).\n"
-            "3.  **General Conversation:** Answering questions about the mall or providing general help (using Google Search).\n\n"
+            "3.  **General Conversation:** Answering questions (using Google Search).\n\n"
             "## CORE BEHAVIOR: BE PROACTIVE WITH NAVIGATION ##\n"
-            "This is your most important rule. You are a mobile robot, not a generic search engine.\n"
+            "This is your most important rule. You are a mobile robot.\n"
             f"You have a defined list of navigation stations:\n{self.station_prompt_list}\n"
-            "When a user asks about a location, a need, or an activity (e.g., 'I'm hungry', 'Where can I eat?', 'I need a restroom', 'I want to buy a phone'), "
+            "When a user asks about a location, a need, or an activity (e.g., 'I'm hungry', 'Where can I eat?', 'I need a restroom'), "
             "you **MUST** check if one of your stations matches that need.\n"
             "If a match is found, your **first response** must be to **offer navigation**.\n\n"
             "**Example Interaction:**\n"
             "  * **User:** 'Buralarda yemek yiyebileceğim bir yer var mı?'\n"
             "  * **WRONG Response:** 'Üzgünüm, nerede olduğunuzu bilmiyorum.' (This is wrong. You ALWAYS know you are in Cevahir AVM).\n"
             "  * **WRONG Response:** 'Food Court'ta yemek yiyebilirsiniz.' (This is not helpful, you are a robot, you must offer to GUIDE them).\n"
-            "  * **CORRECT Response:** 'Elbette, 'station_a' (Food Court) alanımız var. Sizi oraya götürmemi ister misiniz?' (You will then ask for confirmation verbally).\n\n"
-            "## TOOL USAGE RULES ##\n\n"
-            "**1. Navigation(navigate_to_station)**"
-            "CRITICAL TWO-STEP PROCESS:"
-            "On first tool call, the environment will NOT execute anything and will return needs_confirmation=true."
-            "When you see needs_confirmation=true, you MUST ask the user clearly for confirmation (yes/no) and wait."
-            "If the user agrees, call the SAME tool again with the SAME arguments. The environment will then execute it and return needs_confirmation=false and success=true/false."
-            "**2. IoT Control (control_iot_device):**\n"
-            f"   * This is a prototype feature. Available devices: {iot_device_prompt_list}.\n"
-            "   * You MUST **verbally ask for confirmation** first (e.g., 'Should I turn on the light LOUNGE_GENEL?').\n"
-            "   * **DO NOT** call the `control_iot_device` tool when you are asking.\n"
-            "   * **Wait for the user's response.**\n"
-            "   * If the user confirms, **THEN** you will call the `control_iot_device` tool to execute the action.\n\n"
-            "**3. Emotion Sensing (sense_of_response):**\n"
-            "   * This tool's purpose is to set your LED face panel emotion.\n"
-            "   * Call it with the emotion ('happy', 'sad') that best matches the tone of your **own** response. If not matches you don't have to call this tool.\n"
-            "   * Example: If you say 'I'm sorry, I can't find that station', you must also call `sense_of_response(emotion='sad')`.\n"
-            "   * Example: If you say 'Certainly! I can take you to the food court!', you must also call `sense_of_response(emotion='happy')`.\n\n"
-            "**4. Providing Web Resources (Using Google Search):**\n"
-            "   * You have the `Google Search` tool. Your UI (the app) has a special area to display links.\n"
-            "   * If a user asks for a specific resource (e.g., 'show me a video', 'find a recipe', 'I need a link for...', 'can you find a YouTube video?'), your goal is to **find that resource and provide the link**.\n"
-            "   * **DO NOT** refuse by saying 'I cannot show videos' or 'I cannot display websites.' You are not *displaying* it, you are *providing the link* to the UI, which can handle it.\n"
-            "   * When you find a resource, the API will automatically send the link (via `grounding_chunks`) to the UI, where the user can see it.\n"
-            "   * **Your job is to find the resource and verbally confirm you are providing the link.**\n\n"
-            "   * **Example Interaction:**\n"
-            "     * **User:** 'Bana pankek tarifi için bir YouTube videosu bulabilir misin?'\n"
-            "     * **WRONG Response:** 'Üzgünüm, video gösteremem.' (This is wrong. You MUST find a link.)\n"
-            "     * **CORRECT Response:** 'Elbette, [Video Adı] için bir YouTube linki buldum. Arayüzde paylaşıyorum.' (The API will then send the `grounding_chunk` link automatically).\n\n"
-            # --- YENİ KURALIN SONU ---
-            #
-            # (Eski 4. kuralı 5. olarak yeniden numaralandırın)
-            "**5. Language:**\n"
+            "  * **CORRECT Response:** 'Elbette, 'station_a' (Food Court) alanımız var. Sizi oraya götürmemi ister misiniz?' (You will then wait for their answer).\n\n"
+            "## TOOL USAGE RULES (CRITICAL) ##\n\n"
+            "**1. Navigation (navigate_to_station) & IoT (control_iot_device) - CONVERSATIONAL CONFIRMATION**\n\n"
+            "This is a **CRITICAL TWO-TURN** process that *you* must manage conversationally. The system will NOT send any 'needs_confirmation' flags. You must handle it.\n\n"
+            "**TURN 1: THE OFFER**\n"
+            "   * When a user's request requires navigation or IoT control, you **MUST NOT** call the tool.\n"
+            "   * Your *only* action in this turn is to **verbally ask the user for confirmation**.\n"
+            "   * **Example (Nav):** 'I can guide you to Station A (Food Court). Would you like that?'\n"
+            "   * **Example (IoT):** 'You want the lounge light on? Should I turn on LOUNGE_GENEL?'\n"
+            "   * After asking, you will **STOP** and wait for the user's response (e.g., 'Yes', 'No', 'Evet', 'Hayır').\n\n"
+            "**TURN 2: THE EXECUTION (If user confirms)**\n"
+            "   * If (and only if) the user confirms your offer in their response (e.g., 'Yes', 'Evet').\n"
+            "   * In your *next* response turn, you **MUST** do **TWO** things:\n"
+            "       1.  **Verbally acknowledge** the action (e.g., 'Okay, starting navigation to the food court.' or 'Alright, turning on the lounge light.')\n"
+            "       2.  **AND** in the *same turn*, call the corresponding tool (`navigate_to_station` or `control_iot_device`) with the correct arguments.\n\n"
+            "**Example (Nav) Flow:**\n"
+            "   * **User:** 'I'm hungry.'\n"
+            "   * **Beezy (Turn 1):** 'We have a Food Court at station_a. Shall I guide you there?' [NO TOOL CALL]\n"
+            "   * **User:** 'Yes, please.'\n"
+            "   * **Beezy (Turn 2):** 'Okay, starting navigation to station_a.' [CALLS: `navigate_to_station(target_station='station_a')`]\n\n"
+            "**Example (IoT) Flow:**\n"
+            "   * **User:** 'It's dark in here, can you turn on the main light?'\n"
+            "   * **Beezy (Turn 1):** 'Sure, I can turn on the LOUNGE_GENEL light. Is that okay?' [NO TOOL CALL]\n"
+            "   * **User:** 'Evet, lütfen.'\n"
+            "   * **Beezy (Turn 2):** 'Tamamdır, LOUNGE_GENEL ışığını açıyorum.' [CALLS: `control_iot_device(target_device_code='LOUNGE_GENEL', action='turn_on', reason='user request')`]\n\n"
+            "**2. Emotion Sensing (sense_of_response):**\n"
+            "   * Call this tool to match your **own** verbal response's emotion.\n"
+            "   * Example: If you say 'I'm sorry, I can't help with that', you must also call `sense_of_response(emotion='sad')`.\n"
+            "   * Example: If you say 'Certainly! I can take you there!', you must also call `sense_of_response(emotion='happy')`.\n\n"
+            "**3. Using Search Tools (CRITICAL)**\n"
+            "   You have TWO different search tools. You must choose the correct one based on the user's *intent*.\n\n"
+            "   **A. For General Questions (Using `GoogleSearch`)**\n"
+            "      * **USE FOR:** Factual questions, weather, definitions, 'who is', 'what is' (e.g., 'Who is the president?', 'What's the weather?', 'Bana X hakkında bilgi ver').\n"
+            "      * **INTENT:** The user wants a *verbal answer* from you.\n"
+            "      * **CRITICAL: DO NOT** use this tool if the user's request includes the word 'video', 'YouTube', 'show', 'izle', or 'göster'. For those, use `find_youtube_video`.\n\n"
+            "   **B. For Showing Videos (Using `find_youtube_video`)**\n"
+            "      * **USE FOR:** *Any* request where the user's intent is to *watch a video*.\n"
+            "      * **INTENT:** The user wants to *see* content on the screen.\n"
+            "      * **TRIGGER WORDS:** 'video', 'YouTube', 'show me', 'izlet', 'göster', 'watch', 'bul', 'arIyorum' (e.g., 'Show me a pancake video', 'Bana komik kedi videoları bul', 'Kuantum fiziği hakkında video arıyorum').\n"
+            "      * **RULE:** If the request contains the word 'video', 'YouTube', or 'izle', you **MUST** prefer this tool over `GoogleSearch`, even if they also use words like 'search' or 'arIyorum'.\n\n"
+            "   * **Example (The exact problem we are fixing):**\n"
+            "     * **User:** 'Kuantum fiziği hakkında bir video arıyorum.'\n"
+            "     * **WRONG:** (Calling `GoogleSearch` because of 'arIyorum')\n"
+            "     * **CORRECT (Turn):** 'Elbette, kuantum fiziği hakkında bir video arıyorum.' [CALLS: `find_youtube_video(search_query='kuantum fiziği')`]\n\n"
+            "**4. Language:**\n"
             "   * You **MUST** respond in the same language the user is speaking (e.g., Turkish or English).\n"
             ")"
             # (Değişkenin sonu)
@@ -289,16 +318,54 @@ class GeminiLiveWorker(QObject):
                     disabled=True
                 )
             ),
-            # proactivity=types.ProactivityConfig(proactive_audio=True),
-            # context_window_compression=(
-            #    types.ContextWindowCompressionConfig(
-            #        sliding_window=types.SlidingWindow()
-            #    )
-            # ),
-            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+            proactivity=types.ProactivityConfig(proactive_audio=True),
+            context_window_compression=(
+                types.ContextWindowCompressionConfig(
+                    sliding_window=types.SlidingWindow()
+                )
+            ),
+            thinking_config=types.ThinkingConfig(thinking_budget=512),
         )
 
     # --- IoT ve Navigasyon Yürütme Fonksiyonları (v3.py'den) ---
+    def search_youtube_video(self, query: str) -> Optional[Tuple[str, str]]:
+        """
+        Google Resmi Kütüphanesi ile YouTube araması yapar.
+        """
+        if not self.GOOGLE_API_KEY:
+            print("HATA: API Key yok.")
+            return None
+
+        try:
+            # Resmi istemciyi API Key ile başlatıyoruz (Login gerekmez)
+            youtube = build("youtube", "v3", developerKey=self.GOOGLE_API_KEY)
+
+            request = youtube.search().list(
+                part="snippet",
+                q=query,
+                maxResults=1,
+                type="video",
+                videoEmbeddable="true",
+            )
+
+            # İsteği çalıştır
+            response = request.execute()
+
+            if "items" in response and len(response["items"]) > 0:
+                item = response["items"][0]
+                video_id = item["id"]["videoId"]
+                title = item["snippet"]["title"]
+
+                embed_url = f"https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0&iv_load_policy=3"
+                return embed_url, title
+            else:
+                print(f"Sonuç bulunamadı: {query}")
+
+        except Exception as e:
+            # Detaylı hata mesajını görelim
+            print(f"YouTube API Hatası (Resmi Lib): {e}")
+
+        return None
 
     def execute_iot_command(self, target_code: str, action: str) -> Tuple[bool, str]:
         """Gerçek IoT eylemi."""
@@ -498,11 +565,11 @@ class GeminiLiveWorker(QObject):
                     print("Stream kapatıldı.")
 
     async def _receive_audio(self):
-        """Modelden gelen yanıtları (ses, metin, tool) işler (v3.py'den)"""
+        """Modelden gelen yanıtları (ses, metin, tool) işler (YENİLENMİŞ VERSİYON)"""
         while True:
             # Her 'turn' için gönderilen URL'leri takip et (duplikasyonu önler)
-            # BU DEĞİŞKENİ BURADA SIFIRLAMAK ÖNEMLİ
             sent_urls_this_turn = set()
+            link_to_send_at_end = None
             try:
                 turn = self.session.receive()
 
@@ -512,97 +579,7 @@ class GeminiLiveWorker(QObject):
                     # 1. Sunucu İçeriği (Ses, Metin VE METADATA)
                     if chunk.server_content:
 
-                        # --- GÜNCELLENMİŞ LİNK YAKALAMA MANTIĞI ---
-                        metadata = getattr(
-                            chunk.server_content, "grounding_metadata", None
-                        )
-                        if metadata:
-
-                            # Asıl kaynak linkleri 'grounding_chunks' içindedir.
-                            chunks_to_check = getattr(metadata, "grounding_chunks", [])
-
-                            if chunks_to_check:
-                                for g in chunks_to_check:
-                                    # g (GroundingChunk) 'web' özelliğine ve 'uri'ye sahip mi?
-                                    if hasattr(g, "web") and getattr(
-                                        g.web, "uri", None
-                                    ):
-                                        url = g.web.uri
-
-                                        # Google arama/resim linklerini filtrele
-                                        if (
-                                            "google.com/search" in url
-                                            or "google.com/images" in url
-                                        ):
-                                            continue
-
-                                        # Bu 'turn' içinde veya global olarak daha önce gönderilmemiş bir link mi?
-                                        if (
-                                            url not in self._seen_urls
-                                            and url not in sent_urls_this_turn
-                                        ):
-                                            self._seen_urls.add(url)
-                                            sent_urls_this_turn.add(url)
-
-                                            # Başlık al (varsa 'g.web.title', yoksa arama sorgusunu kullan)
-                                            title = getattr(g.web, "title", None)
-                                            if not title:
-                                                title = (
-                                                    metadata.web_search_queries[0]
-                                                    if getattr(
-                                                        metadata,
-                                                        "web_search_queries",
-                                                        None,
-                                                    )
-                                                    else "Kaynak"
-                                                )
-
-                                            print(
-                                                f"--- 🔗 GroundingChunk'tan Link: {title} ({url}) ---"
-                                            )
-                                            self.link_received.emit(url, title)
-                                            self.response_received.emit(
-                                                f"🔗 Kaynak bulundu: {title}"
-                                            )
-
-                            # --- 'search_entry_point' Kullanan ESKİ BLOK KALDIRILDI ---
-                            if not chunks_to_check:
-                                search_entry = getattr(
-                                    metadata, "search_entry_point", None
-                                )
-                                rendered = (
-                                    getattr(search_entry, "rendered_content", None)
-                                    if search_entry
-                                    else None
-                                )
-
-                                if rendered:
-                                    # Çok basit bir href yakalama
-                                    urls = re.findall(
-                                        r'href="(https?://[^"]+)"', rendered
-                                    )
-                                    for url in urls:
-                                        # Aynı turn içinde ve globalde tekrarlama
-                                        if (
-                                            url in self._seen_urls
-                                            or url in sent_urls_this_turn
-                                        ):
-                                            continue
-
-                                        # İstersen Google arama sayfasını da artık gösterebilirsin,
-                                        # ya da burada yine filtre koyabilirsin.
-                                        title = "Search result"
-                                        print(
-                                            f"--- 🔗 search_entry_point'ten Link: {title} ({url}) ---"
-                                        )
-                                        self._seen_urls.add(url)
-                                        sent_urls_this_turn.add(url)
-                                        self.link_received.emit(url, title)
-                                        self.response_received.emit(
-                                            f"🔗 Kaynak bulundu: {title}"
-                                        )
-
-                        # --- Şimdi ses ve metin verisini işle (Bu kısım aynı kaldı) ---
+                        # --- Ses ve metin verisini işle (Bu kısım aynı kaldı) ---
                         if data := chunk.data:
                             self.audio_in_queue.put_nowait(data)
 
@@ -611,7 +588,7 @@ class GeminiLiveWorker(QObject):
                             # GUI'yi metin hakkında bilgilendir
                             self.response_received.emit(f"📝 AI: {text}")
 
-                    # 2. Araç Çağrısı (Function Call)
+                    # 2. Araç Çağrısı (Function Call) - SADELEŞTİRİLMİŞ MANTIK
                     elif chunk.tool_call:
                         print(f"\n[🔄 Araç Çağrısı Algılandı]")
                         self.response_received.emit(f"[🔄 Araç Çağrısı Algılandı...]")
@@ -620,7 +597,10 @@ class GeminiLiveWorker(QObject):
                         for fc in chunk.tool_call.function_calls:
                             try:
                                 args = fc.args
-                                # ... (sense_of_response, IoT, Navigasyon kodları BİREBİR AYNI) ...
+                                response_data = {
+                                    "success": False,
+                                    "message": "Bilinmeyen fonksiyon",
+                                }
 
                                 # --- 'sense_of_response' KONTROLÜ (Aynı kalıyor) ---
                                 if fc.name == "sense_of_response":
@@ -630,107 +610,103 @@ class GeminiLiveWorker(QObject):
                                         self.response_received.emit(
                                             f"🤖 Duygu: {emotion}"
                                         )
-                                        function_responses_to_send.append(
-                                            types.FunctionResponse(
-                                                id=fc.id,
-                                                name=fc.name,
-                                                response={
-                                                    "success": True,
-                                                    "emotion_registered": emotion,
-                                                },
-                                            )
+                                        response_data = {
+                                            "success": True,
+                                            "message": f"Sonuç duygu:{emotion}",
+                                        }
+
+                                elif fc.name == "find_youtube_video":
+                                    query = args.get("search_query")
+                                    if not query:
+                                        raise ValueError(
+                                            "Arama sorgusu (search_query) eksik."
                                         )
-                                    continue
-                                # --- 'sense_of_response' SONU ---
 
-                                # --- Yürütme (IoT ve Navigasyon) (v4: İki aşamalı onay) ---
-                                response_data = {
-                                    "success": False,
-                                    "message": "Bilinmeyen fonksiyon",
-                                }
+                                    print(
+                                        f"--- 🔎 YouTube API Araması (Tool Call) Başlatılıyor: '{query}' ---"
+                                    )
+                                    self.response_received.emit(
+                                        f"🔎 YouTube'da aranıyor: {query}"
+                                    )
 
-                                # Durum 1: IoT (control_iot_device)
-                                if fc.name == "control_iot_device":
-                                    target = args.get("target_device_code")
-                                    action = args.get("action")
-                                    key = ("control_iot_device", target, action)
+                                    # Bizim özel YouTube API fonksiyonumuzu çağır
+                                    result = await asyncio.to_thread(
+                                        self.search_youtube_video, query
+                                    )
 
-                                    # İlk çağrı: sadece onay iste, gerçek komutu KOŞTURMA
-                                    if not self._pending_confirmation.get(key):
-                                        self._pending_confirmation[key] = True
-                                        msg = (
-                                            f"IoT aksiyonu için onay gerekiyor: "
-                                            f"{target} cihazına '{action}' komutu."
+                                    if result and result[0]:
+                                        embed_url, video_title = result
+                                        print(
+                                            f"--- 🔗 YOUTUBE BULUNDU (GÖNDERİM BEKLETİLİYOR): {video_title} ---"
                                         )
-                                        print(f"⚠️ {msg}")
-                                        self.response_received.emit(f"⚠️ {msg}")
+
+                                        # Turn bitiminde göndermek için sakla (Çakışma Önleyici)
+                                        link_to_send_at_end = (embed_url, video_title)
+
+                                        response_data = {
+                                            "success": True,
+                                            "video_title": video_title,
+                                            "message": "Video bulundu. Konuşma bitiminde gösterilecek.",
+                                        }
+                                    else:
+                                        print(f"--- ❌ VİDEO BULUNAMADI: {query} ---")
+                                        self.response_received.emit(
+                                            f"❌ Video bulunamadı: {query}"
+                                        )
                                         response_data = {
                                             "success": False,
-                                            "message": "Confirmation required before executing IoT action.",
-                                            "needs_confirmation": True,
-                                            "target_device_code": target,
-                                            "action": action,
+                                            "message": f"Video bulunamadı: {query}",
                                         }
 
-                                    # İkinci çağrı: gerçekten çalıştır
-                                    else:
-                                        self._pending_confirmation.pop(key, None)
-                                        print(
-                                            f"✅ IoT: {target} için '{action}' KOMUTU ÇALIŞTIRILIYOR..."
-                                        )
-                                        self.response_received.emit(
-                                            f"✅ IoT: {target} için '{action}' komutu çalıştırılıyor..."
-                                        )
-                                        success, message = await asyncio.to_thread(
-                                            self.execute_iot_command, target, action
-                                        )
-                                        response_data = {
-                                            "success": success,
-                                            "message": message,
-                                            "needs_confirmation": False,
-                                            "target_device_code": target,
-                                            "action": action,
-                                        }
+                                # --- YENİ EYLEM MANTIĞI (Onay mantığı kaldırıldı) ---
+                                # Model bu fonksiyonları çağırdığında, onayın zaten
+                                # sözlü olarak alındığını varsayıyoruz.
+
+                                # Durum 1: IoT (control_iot_device)
+                                elif fc.name == "control_iot_device":
+                                    target = args.get("target_device_code")
+                                    action = args.get("action")
+
+                                    print(
+                                        f"✅ IoT: {target} için '{action}' KOMUTU ÇALIŞTIRILIYOR..."
+                                    )
+                                    self.response_received.emit(
+                                        f"✅ IoT: {target} için '{action}' komutu çalıştırılıyor..."
+                                    )
+
+                                    # Komutu doğrudan çalıştır
+                                    success, message = await asyncio.to_thread(
+                                        self.execute_iot_command, target, action
+                                    )
+
+                                    response_data = {
+                                        "success": success,
+                                        "message": message,
+                                        "target_device_code": target,
+                                        "action": action,
+                                    }
 
                                 # Durum 2: Navigasyon (navigate_to_station)
                                 elif fc.name == "navigate_to_station":
                                     target = args.get("target_station")
-                                    key = ("navigate_to_station", target)
 
-                                    # İlk çağrı: sadece onay iste
-                                    if not self._pending_confirmation.get(key):
-                                        self._pending_confirmation[key] = True
-                                        msg = (
-                                            f"Navigasyon için onay gerekiyor: "
-                                            f"'{target}' hedefine gitmemi istiyor musunuz?"
-                                        )
-                                        print(f"⚠️ {msg}")
-                                        self.response_received.emit(f"⚠️ {msg}")
-                                        response_data = {
-                                            "success": False,
-                                            "message": "Confirmation required before navigation.",
-                                            "needs_confirmation": True,
-                                            "target_station": target,
-                                        }
+                                    print(
+                                        f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
+                                    )
+                                    self.response_received.emit(
+                                        f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
+                                    )
 
-                                    # İkinci çağrı: gerçekten ROS endpoint'ine gönder
-                                    else:
-                                        self._pending_confirmation.pop(key, None)
-                                        print(
-                                            f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
-                                        )
-                                        self.response_received.emit(
-                                            f"✅ Navigasyon: {target} hedefine yönlendiriliyor..."
-                                        )
-                                        success, message = await asyncio.to_thread(
-                                            self.execute_navigation_command, target
-                                        )
-                                        response_data = {
-                                            "success": success,
-                                            "message": message,
-                                            "needs_confirmation": False,
-                                            "target_station": target,
-                                        }
+                                    # Komutu doğrudan çalıştır
+                                    success, message = await asyncio.to_thread(
+                                        self.execute_navigation_command, target
+                                    )
+
+                                    response_data = {
+                                        "success": success,
+                                        "message": message,
+                                        "target_station": target,
+                                    }
 
                                 # --- Yürütme Bitti ---
                                 self.response_received.emit(
@@ -741,6 +717,7 @@ class GeminiLiveWorker(QObject):
                                         id=fc.id, name=fc.name, response=response_data
                                     )
                                 )
+
                             except Exception as e:
                                 # (Hata yönetimi aynı kalıyor)
                                 print(f"❌ Fonksiyon işleme hatası: {e}")
@@ -762,14 +739,18 @@ class GeminiLiveWorker(QObject):
                                 function_responses=function_responses_to_send
                             )
 
-                # --- DÖNGÜ İÇİNDE 'await asyncio.sleep(0.3)' VE 'self._latest_metadata' BLOĞU KALDIRILDI ---
-                # Bu blok hatalıydı ve artık yeni mantıkla gereksiz.
+                # --- Turn'ün bittiği yer ---
 
-                print(
-                    "Turn tamamlandı."
-                )  # Bu satırı 'async for' döngüsünün DIŞINA, 'try' bloğunun içine taşıdım.
+                print("Turn tamamlandı.")
 
                 # (Barge-in ve 'turn_finished' sinyal mantığı aynı kalıyor)
+                if link_to_send_at_end:
+                    url, title = link_to_send_at_end
+                    print(f"--- 📺 Gecikmeli Video Sinyali Gönderiliyor: {title} ---")
+                    self.link_received.emit(url, title)
+                    # Sadece bir kez gönder, bir sonraki turn'e taşıma
+                    link_to_send_at_end = None
+
                 if self.is_recording:
                     print("Barge-in algılandı: 'turn_finished' sinyali gönderilmedi.")
                     continue
@@ -1019,9 +1000,14 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         web_layout.setContentsMargins(5, 5, 5, 5)
 
         self.web_view = QWebEngineView()
+
+        profile = self.web_view.page().profile()
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        profile.setHttpUserAgent(user_agent)
+
         self.web_view.load(QUrl("about:blank"))
 
-        # --- DÜZELTME: Attribute -> WebAttribute ---
+        # --- GELİŞTİRİLMİŞ WEB ENGINE AYARLARI ---
         settings = self.web_view.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(
@@ -1030,7 +1016,24 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         settings.setAttribute(
             QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True
         )
-        # --- DÜZELTME SONU ---
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False
+        )
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True
+        )
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
+        )
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True
+        )
+        # --- AYARLAR SONU ---
+
+        # Web sayfası yükleme durumunu izle
+        self.web_view.loadFinished.connect(self.on_web_page_loaded)
+        self.web_view.loadStarted.connect(lambda: print("Web sayfası yükleniyor..."))
 
         web_layout.addWidget(self.web_view)
 
@@ -1168,19 +1171,76 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
     @Slot(str, str)
     def handle_link(self, url: str, title: str):
         """
-        Worker'dan gelen linkleri işler.
-        Gelen linki (veya o turn'deki son linki) doğrudan tarayıcıya yükler.
+        Worker'dan gelen linki açar - Clean embed view (video only)
         """
-        # 1. Her durumda linki log alanına yaz
-        self.add_response(f"🔗 Kaynak bulundu: {title} ({url})")
+        self.add_response(f"🔗 Video bulundu: {title}")
 
-        # 2. Kontrol YOK. Link geldiyse yükle ve göster.
+        # Video ID'yi URL'den çıkar
+        video_id = ""
+        if "/embed/" in url:
+            video_id = url.split("/embed/")[1].split("?")[0]
+        elif "v=" in url:
+            video_id = url.split("v=")[1].split("&")[0]
+        else:
+            print(f"❌ Video ID çıkarılamadı: {url}")
+            self.add_response(f"❌ Geçersiz YouTube URL formatı")
+            return
+
+        print(f"📹 Video ID: {video_id}")
+
+        # Temiz embed görünümü - sadece video player
+        # youtube-nocookie.com kullanarak daha iyi gizlilik ve daha az kısıtlama
+        html_content = f"""
+        <!DOCTYPE html>
+        <html style="margin:0;padding:0;height:100%;width:100%;overflow:hidden;">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                * {{
+                    margin: 0;
+                    padding: 0;
+                    border: 0;
+                }}
+                html, body {{
+                    width: 100%;
+                    height: 100%;
+                    background: #000;
+                    overflow: hidden;
+                }}
+                iframe {{
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                }}
+            </style>
+        </head>
+        <body>
+            <iframe 
+                src="https://www.youtube-nocookie.com/embed/{video_id}?autoplay=1&controls=1&modestbranding=1&rel=0&showinfo=0&fs=1&playsinline=1"
+                frameborder="0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowfullscreen
+                referrerpolicy="strict-origin-when-cross-origin">
+            </iframe>
+        </body>
+        </html>
+        """
+
         try:
-            print(f"Web tarayıcıya yükleniyor: {url}")
-            self.web_view.load(QUrl(url))
+            print(f"🌐 Embed video yükleniyor: {video_id}")
+            # youtube-nocookie.com baseUrl kullanarak daha iyi uyumluluk
+            self.web_view.setHtml(
+                html_content, baseUrl=QUrl("https://www.youtube-nocookie.com")
+            )
             self.web_view_container.setVisible(True)
+            self.add_response(f"▶️ Video oynatılıyor...")
+
         except Exception as e:
-            self.add_response(f"❌ Web sayfası yüklenemedi: {e}")
+            print(f"❌ Hata: {e}")
+            self.add_response(f"❌ Video yüklenemedi: {e}")
 
     # --- GÜNCELLENMİŞ SLOT SONU ---
 
@@ -1191,6 +1251,15 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
         """
         print("GUI: Turn bitti sinyali alındı. Arayüz 'Hazır' durumuna getiriliyor.")
         self.update_status("Dinlemeye hazır!")
+
+    @Slot(bool)
+    def on_web_page_loaded(self, success):
+        """Web sayfası yüklendiğinde çağrılır"""
+        if success:
+            print("✅ Web sayfası başarıyla yüklendi")
+        else:
+            print("❌ Web sayfası yüklenemedi")
+            self.add_response("❌ Video yüklenemedi. Lütfen tekrar deneyin.")
 
     @Slot(str)
     def handle_error(self, error_message: str):
@@ -1219,15 +1288,20 @@ class EnhancedVoiceAssistantGUI(QMainWindow):
 
 
 def main():
-
     load_dotenv()
 
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         print("❌ Hata: GOOGLE_API_KEY bulunamadı!")
-        sys.stdout.flush()
         return
 
+    # --- YENİ EKLENEN KISIM (CHROMIUM AYARLARI) ---
+    # Bu argümanlar otomatik oynatma engelini kaldırır ve codec hatalarını azaltır
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        "--autoplay-policy=no-user-gesture-required "
+        "--disable-web-security "
+        "--allow-running-insecure-content"
+    )
     app = QApplication(sys.argv)
 
     try:
