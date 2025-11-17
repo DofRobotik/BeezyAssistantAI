@@ -4,13 +4,14 @@ import requests
 import json
 import random
 
-#import sys
-#reload(sys)
-#sys.setdefaultencoding('utf-8')
+# import sys
+# reload(sys)
+# sys.setdefaultencoding('utf-8')
+
 
 # http://192.168.1.114:3001/places/
 class AmrLoungeClass(object):
-    def __init__(self, service_url='localhost', port=3001):
+    def __init__(self, service_url="localhost", port=3001):
         self.__service_url = self.__generate_url(service_url, port)
         self.__location = "places"
         self.__aircon_key = "k"
@@ -18,229 +19,81 @@ class AmrLoungeClass(object):
 
         self.__lounge_place = {
             "a": [
-                    {
-                        "code": "LOUNGE_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "LOUNGE_GIRIS",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "LOUNGE_MERDIVEN_USTU",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "ORTAK_ALAN",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "BITKI_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "ORTAK_ALAN_TABELA",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "DUVAR_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "DIS_TABELA",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ],
+                {"code": "LOUNGE_GENEL", "switch": True, "dimming": None},
+                {"code": "LOUNGE_GIRIS", "switch": True, "dimming": None},
+                {"code": "LOUNGE_MERDIVEN_USTU", "switch": True, "dimming": None},
+                {"code": "ORTAK_ALAN", "switch": True, "dimming": None},
+                {"code": "BITKI_LED", "switch": True, "dimming": 0},
+                {"code": "ORTAK_ALAN_TABELA", "switch": True, "dimming": 0},
+                {"code": "DUVAR_LED", "switch": True, "dimming": 0},
+                {"code": "DIS_TABELA", "switch": True, "dimming": 0},
+            ],
             "b": [
-                    {
-                        "code": "GORUSME_ODA_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "GORUSME_ODA1",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "GORUSME_ODA2",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "GORUSME_ODA3",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "GORUSME_ODA1_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "GORUSME_ODA2_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "GORUSME_ODA3_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ],
+                {"code": "GORUSME_ODA_GENEL", "switch": True, "dimming": None},
+                {"code": "GORUSME_ODA1", "switch": True, "dimming": None},
+                {"code": "GORUSME_ODA2", "switch": True, "dimming": None},
+                {"code": "GORUSME_ODA3", "switch": True, "dimming": None},
+                {"code": "GORUSME_ODA1_LED", "switch": True, "dimming": 0},
+                {"code": "GORUSME_ODA2_LED", "switch": True, "dimming": 0},
+                {"code": "GORUSME_ODA3_LED", "switch": True, "dimming": 0},
+            ],
             "c": [
-                    {  
-                        "code": "AMFI_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "AMFI_SPOT",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "AMFI_BASAMAK",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "AMFI_MOR_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "AMFI_TABELA",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ],
+                {"code": "AMFI_GENEL", "switch": True, "dimming": None},
+                {"code": "AMFI_SPOT", "switch": True, "dimming": None},
+                {"code": "AMFI_BASAMAK", "switch": True, "dimming": 0},
+                {"code": "AMFI_MOR_LED", "switch": True, "dimming": 0},
+                {"code": "AMFI_TABELA", "switch": True, "dimming": 0},
+            ],
             "d": [
-                    {  
-                        "code": "MUTFAK_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "MUTFAK_SARKIT",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "MUTFAK_SPOT",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "MUTFAK_TABELA",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ],
+                {"code": "MUTFAK_GENEL", "switch": True, "dimming": None},
+                {"code": "MUTFAK_SARKIT", "switch": True, "dimming": None},
+                {"code": "MUTFAK_SPOT", "switch": True, "dimming": None},
+                {"code": "MUTFAK_TABELA", "switch": True, "dimming": 0},
+            ],
             "e": [
-                    {  
-                        "code": "UST_TOPLANTI_ODA_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "UST_TOPLANTI_ODA_KENAR",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "UST_TOPLANTI_ODA_ORTA",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "UST_TOPLANTI_ODA_SARKIT",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ],
+                {"code": "UST_TOPLANTI_ODA_GENEL", "switch": True, "dimming": None},
+                {"code": "UST_TOPLANTI_ODA_KENAR", "switch": True, "dimming": None},
+                {"code": "UST_TOPLANTI_ODA_ORTA", "switch": True, "dimming": None},
+                {"code": "UST_TOPLANTI_ODA_SARKIT", "switch": True, "dimming": 0},
+            ],
             "f": [
-                    {  
-                        "code": "ALT_TOPLANTI_ODA_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "ALT_TOPLANTI_ODA",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "ALT_TOPLANTI_ODA_BASAMAK",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "ALT_TOPLANTI_ODA_LED",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ],
+                {"code": "ALT_TOPLANTI_ODA_GENEL", "switch": True, "dimming": None},
+                {"code": "ALT_TOPLANTI_ODA", "switch": True, "dimming": None},
+                {"code": "ALT_TOPLANTI_ODA_BASAMAK", "switch": True, "dimming": 0},
+                {"code": "ALT_TOPLANTI_ODA_LED", "switch": True, "dimming": 0},
+            ],
             "g": [
-                    {  
-                        "code": "WC_GENEL",
-                        "switch": True,
-                        "dimming": None
-                    },
-                    {
-                        "code": "WC_GENEL_KORIDOR",
-                        "switch": True,
-                        "dimming": None
-                    }, 
-                    {  
-                        "code": "WC_ENGELLI",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "WC_KADIN",
-                        "switch": True,
-                        "dimming": 0
-                    }, 
-                    {  
-                        "code": "WC_ERKEK",
-                        "switch": True,
-                        "dimming": 0
-                    }
-                ]
-            }
+                {"code": "WC_GENEL", "switch": True, "dimming": None},
+                {"code": "WC_GENEL_KORIDOR", "switch": True, "dimming": None},
+                {"code": "WC_ENGELLI", "switch": True, "dimming": 0},
+                {"code": "WC_KADIN", "switch": True, "dimming": 0},
+                {"code": "WC_ERKEK", "switch": True, "dimming": 0},
+            ],
+        }
 
         self.__group_name = {
-                "a": "Genel",
-                "b": "Gorusme Oda",
-                "c": "Amfi",
-                "d": "Mutfak",
-                "e": "Ust Toplanti Oda",
-                "f": "Alt Toplanti Oda",
-                "g": "Tuvalet",
-                "h": "Merkez",
-                "k": "Klima"
-            }
+            "a": "Genel",
+            "b": "Gorusme Oda",
+            "c": "Amfi",
+            "d": "Mutfak",
+            "e": "Ust Toplanti Oda",
+            "f": "Alt Toplanti Oda",
+            "g": "Tuvalet",
+            "h": "Merkez",
+            "k": "Klima",
+        }
 
         self.__group_index = {
-                "a": 0,
-                "b": 1,
-                "c": 2,
-                "d": 3,
-                "e": 4,
-                "f": 5,
-                "g": 6,
-                "h": 7,
-                "k": 8
-            }
+            "a": 0,
+            "b": 1,
+            "c": 2,
+            "d": 3,
+            "e": 4,
+            "f": 5,
+            "g": 6,
+            "h": 7,
+            "k": 8,
+        }
 
         """
             "code": "KLIMA_GENEL",      # İsim
@@ -250,30 +103,29 @@ class AmrLoungeClass(object):
             "temperature": None         # Set point temperature control (ortam sıcaklığı belirtmek için kullanılır)
         """
         self.__aircon_list = [
-                    {
-                        "code": "KLIMA_GENEL",
-                        "switch": True,
-                        "mode": 0,
-                        "fanspeed": 0,
-                        "temperature": 25
-                    }, 
-                    {
-                        "code": "KLIMA_GIRIS",
-                        "switch": True,
-                        "mode": 0,
-                        "fanspeed": 0,
-                        "temperature": 25
-                    }, 
-                    {
-                        "code": "KLIMA_AMFI",
-                        "switch": True,
-                        "mode": 0,
-                        "fanspeed": 0,
-                        "temperature": 25
-                    }
-                ]
+            {
+                "code": "KLIMA_GENEL",
+                "switch": True,
+                "mode": 0,
+                "fanspeed": 0,
+                "temperature": 25,
+            },
+            {
+                "code": "KLIMA_GIRIS",
+                "switch": True,
+                "mode": 0,
+                "fanspeed": 0,
+                "temperature": 25,
+            },
+            {
+                "code": "KLIMA_AMFI",
+                "switch": True,
+                "mode": 0,
+                "fanspeed": 0,
+                "temperature": 25,
+            },
+        ]
 
-    
     """
     Verilen grup ve konum indexine göre grup adı ve o konuma ait cihaz verisini döner.
 
@@ -292,6 +144,7 @@ class AmrLoungeClass(object):
     Notes:
         - Eğer verilen grup veya konum indexi geçerli değilse, hata yakalanır ve None döner.
     """
+
     def get_group_and_place_func(self, group_index, place_index):
         try:
             group_name = self.__group_name[group_index]
@@ -303,8 +156,6 @@ class AmrLoungeClass(object):
             print("get_group_and_place_func Error = {}".format(err))
             return None, None
 
-
-    
     """
     Belirtilen bir aydınlatma cihazı için verileri hazırlayıp sunucuya gönderir.
 
@@ -321,6 +172,19 @@ class AmrLoungeClass(object):
         - Eğer dimming değeri None verilirse, cihazın mevcut dimming değeri kullanılır.
         - Eğer switch False olarak ayarlanmışsa, dimming değeri 0 olarak güncellenir (ışık kapatılır).
     """
+
+    def get_all_devices(self):
+        """Returns a dict mapping device_code to its metadata for LLM context."""
+        devices = {}
+        # Lights
+        for grp, items in self.__lounge_place.items():
+            for idx, item in enumerate(items):
+                devices[item["code"]] = {"type": "light", "group": grp, "index": idx}
+        # Aircon (Optional implementation)
+        for idx, item in enumerate(self.__aircon_list):
+            devices[item["code"]] = {"type": "aircon", "index": idx}
+        return devices
+
     def send_data_for_light_func(self, group_index, place_index, switch, dimming=None):
         try:
             _, place_value = self.get_group_and_place_func(group_index, place_index)
@@ -335,17 +199,18 @@ class AmrLoungeClass(object):
             if not switch:
                 dimming_value = 0
 
-            data_to_send = self.__generate_data_func(group_index, place_value["code"], switch, dimming_value)    # place_value["dimming"]
+            data_to_send = self.__generate_data_func(
+                group_index, place_value["code"], switch, dimming_value
+            )  # place_value["dimming"]
             print("Data Set = {}".format(data_to_send))
 
             # TODO: Acilacak, test asamasinda
             return self.__send_request(data_to_send)
-            #return True
+            # return True
 
         except Exception as err:
             print("Send Data Error = {}".format(err))
             return None
-
 
     """
     Genel bir cihaz için gönderilecek veriyi oluşturur.
@@ -365,6 +230,7 @@ class AmrLoungeClass(object):
         - "groupId" alanı isteğe bağlıdır, string veya int olabilir.
         - Eğer dimming değeri verilmemişse rastgele 1-255 arasında bir değer atanır.
     """
+
     def __generate_data_func(self, group, code_name, switch, dimming=None, name=None):
         try:
             if name is None:
@@ -372,19 +238,21 @@ class AmrLoungeClass(object):
 
             if dimming == None:
                 dimming = random.randint(1, 255)
-                #dimming = 1
+                # dimming = 1
 
             if group == None or isinstance(group, str):
-                #group = random.randint(1, 20)
-                group = self.__group_index[group]       # + 5   # Shift value
+                # group = random.randint(1, 20)
+                group = self.__group_index[group]  # + 5   # Shift value
 
-            data = {"code": code_name,      # String            (ORTAK_ALAN_TABELA)
-                    "name": name,           # String            (Ortak Alan Tabela)
-                                            # NOTE: "name" attribute'u Sadece gorunus amacli, istenirse kaldirilabilir
-                    "switch": switch,       # Bool              (True / False)
-                    "dimming": dimming,     # Int               (0 - 255)
-                    "groupId": group}       # String / Int      ("B" / 1)
-                                            # NOTE: Group ID istege baglidir, string yada int olabilir
+            data = {
+                "code": code_name,  # String            (ORTAK_ALAN_TABELA)
+                "name": name,  # String            (Ortak Alan Tabela)
+                # NOTE: "name" attribute'u Sadece gorunus amacli, istenirse kaldirilabilir
+                "switch": switch,  # Bool              (True / False)
+                "dimming": dimming,  # Int               (0 - 255)
+                "groupId": group,
+            }  # String / Int      ("B" / 1)
+            # NOTE: Group ID istege baglidir, string yada int olabilir
 
             return data
 
@@ -408,7 +276,10 @@ class AmrLoungeClass(object):
     Notes:
         - Mode, fanspeed ve temperature parametreleri isteğe bağlıdır. Eğer None verilirse cihazın o anki değeri kullanılır.
     """
-    def send_data_for_aircon_func(self, aircon_index, switch, mode=None, fanspeed=None, temperature=None):
+
+    def send_data_for_aircon_func(
+        self, aircon_index, switch, mode=None, fanspeed=None, temperature=None
+    ):
         try:
             aircon_value = self.__aircon_list[aircon_index]
 
@@ -430,7 +301,6 @@ class AmrLoungeClass(object):
             else:
                 self.__aircon_list[aircon_index]["temperature"] = temperature
 
-
             """
                 {
                     "code": "KLIMA_GENEL",
@@ -441,8 +311,9 @@ class AmrLoungeClass(object):
                 }
             """
 
-
-            data_to_send = self.__generate_data_for_aircon_func(aircon_value["code"], switch, mode, fanspeed, temperature)
+            data_to_send = self.__generate_data_for_aircon_func(
+                aircon_value["code"], switch, mode, fanspeed, temperature
+            )
             print("\n\nData Set = {}\n\n".format(data_to_send))
 
             return self.__send_request(data_to_send)
@@ -451,7 +322,6 @@ class AmrLoungeClass(object):
         except Exception as err:
             print("Send Data Error = {}".format(err))
             return None
-
 
     """
     Klima cihazı için gerekli olan veriyi oluşturur.
@@ -470,20 +340,25 @@ class AmrLoungeClass(object):
         - "name" alanı yalnızca görsel amaçlıdır ve gerekirse kaldırılabilir.
         - "groupId" alanı isteğe bağlıdır, string veya int olabilir.
     """
-    def __generate_data_for_aircon_func(self, code_name, switch, mode, fanspeed, temperature):
+
+    def __generate_data_for_aircon_func(
+        self, code_name, switch, mode, fanspeed, temperature
+    ):
         try:
             group = self.__group_index[self.__aircon_key]
             name = str(code_name).capitalize().title().replace("_", " ")
 
-            data = {"code": code_name,          # String            (KLIMA_GIRIS)
-                    "name": name,               # String            (Klima Giris)
-                                                # NOTE: "name" attribute'u Sadece gorunus amacli, istenirse kaldirilabilir
-                    "switch": switch,           # Bool              (True / False)
-                    "mode": mode,               # 
-                    "fanspeed": fanspeed,       # 
-                    "temperature": temperature, # 
-                    "groupId": group}           # String / Int      ("B" / 1)
-                                                # NOTE: Group ID istege baglidir, string yada int olabilir
+            data = {
+                "code": code_name,  # String            (KLIMA_GIRIS)
+                "name": name,  # String            (Klima Giris)
+                # NOTE: "name" attribute'u Sadece gorunus amacli, istenirse kaldirilabilir
+                "switch": switch,  # Bool              (True / False)
+                "mode": mode,  #
+                "fanspeed": fanspeed,  #
+                "temperature": temperature,  #
+                "groupId": group,
+            }  # String / Int      ("B" / 1)
+            # NOTE: Group ID istege baglidir, string yada int olabilir
 
             return data
 
@@ -501,6 +376,7 @@ class AmrLoungeClass(object):
         response (requests.Response or None): Eğer istek başarılı olursa sunucudan gelen 
         cevabı döner. Aksi takdirde None döner.
     """
+
     def __send_request(self, data_to_send):
         try:
             if data_to_send is None:
@@ -512,9 +388,15 @@ class AmrLoungeClass(object):
             # JSON formatındaki veriyi hazırla
             json_data = json.dumps(data_to_send)
 
-            response = requests.post(send_url, data=json_data, headers={"Content-Type": "application/json"})
+            response = requests.post(
+                send_url, data=json_data, headers={"Content-Type": "application/json"}
+            )
             response.raise_for_status()
-            print("Veri başarıyla gönderildi. HTTP Status Code = {}".format(response.status_code))
+            print(
+                "Veri başarıyla gönderildi. HTTP Status Code = {}".format(
+                    response.status_code
+                )
+            )
             print("Sunucu tarafından dönen veri = {}".format(response.json()))
 
             return response
@@ -527,7 +409,6 @@ class AmrLoungeClass(object):
             print("Send Request Main Error = {}".format(err))
             return None
 
-
     """
     Verilen URL ve port bilgisini kullanarak tam bir servis URL'si oluşturur.
 
@@ -538,6 +419,7 @@ class AmrLoungeClass(object):
     Returns:
         str: Tam URL formatında servis adresi.
     """
+
     def __generate_url(self, url, port):
         return "http://{0}:{1}/".format(url, port)
 
@@ -566,6 +448,7 @@ def light_test(lounge_class):
     except Exception as err:
         print("light_test Error = {}!".format(err))
 
+
 def turn_off_all_lights(lounge_class):
     """
     Turns off all lights (in all lounge areas).
@@ -580,7 +463,7 @@ def turn_off_all_lights(lounge_class):
                     group_index=group_index,
                     place_index=place_index,
                     switch=False,
-                    dimming=0
+                    dimming=0,
                 )
         print("✅ All lights have been turned OFF successfully.")
 
@@ -597,19 +480,24 @@ def turn_on_all_lights(lounge_class, default_dimming=120):
         for group_index, devices in lounge_class._AmrLoungeClass__lounge_place.items():
             for place_index, device in enumerate(devices):
                 code = device["code"]
-                dimming_value = device["dimming"] if device["dimming"] not in (None, 0) else default_dimming
-                print(f"🟢 Turning ON → Group: {group_index}, Device: {code}, Dimming: {dimming_value}")
+                dimming_value = (
+                    device["dimming"]
+                    if device["dimming"] not in (None, 0)
+                    else default_dimming
+                )
+                print(
+                    f"🟢 Turning ON → Group: {group_index}, Device: {code}, Dimming: {dimming_value}"
+                )
                 lounge_class.send_data_for_light_func(
                     group_index=group_index,
                     place_index=place_index,
                     switch=True,
-                    dimming=dimming_value
+                    dimming=dimming_value,
                 )
         print("✅ All lights have been turned ON successfully.")
 
     except Exception as err:
         print(f"turn_on_all_lights Error = {err}!")
-
 
 
 def aircon_test(lounge_class):
@@ -619,21 +507,24 @@ def aircon_test(lounge_class):
     fanspeed = 3
     temperature = 21
 
-    lounge_class.send_data_for_aircon_func(aircon_index, switch, mode, fanspeed, temperature)
+    lounge_class.send_data_for_aircon_func(
+        aircon_index, switch, mode, fanspeed, temperature
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     try:
-        service_url = "10.10.10.244"        #"192.168.1.114"   #"10.10.10.46"    #"192.168.1.114"
+        service_url = (
+            "10.10.10.244"  # "192.168.1.114"   #"10.10.10.46"    #"192.168.1.114"
+        )
         port = 3001
 
         lounge_class = AmrLoungeClass(service_url, port)
 
-        #light_test(lounge_class)
-        #turn_on_all_lights(lounge_class)
-        #aircon_test(lounge_class)
-
+        # light_test(lounge_class)
+        # turn_on_all_lights(lounge_class)
+        # aircon_test(lounge_class)
 
     except Exception as err:
         print("__main__ Error = {}!".format(err))

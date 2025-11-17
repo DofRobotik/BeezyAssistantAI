@@ -3,8 +3,8 @@ import time
 import httpx
 import json
 
-from .utils import safe_json_find
-from .llm import LLM
+from utils import safe_json_find
+from llm import LLM
 
 # iot.py'den AmrLoungeClass'ı import et (Bu, cihaz listesini çekmek için gereklidir)
 try:
@@ -75,87 +75,137 @@ class Agent:
         self.iot_device_prompt_list = ", ".join(all_iot_device_codes)
         # --- Hazırlık Bitti ---
 
-    def _build_unified_prompt(self, text: str) -> str:
-        """
-        Navigasyon, IoT ve Chat'i kapsayan birleşik LLM prompt'unu oluşturur.
-        """
+    def _format_history(self, history: List[Dict[str, str]]) -> str:
+        """Sohbet geçmişini metne döker."""
+        if not history:
+            return "No previous conversation."
+
+        formatted = []
+        # Son 3 turu (6 mesaj) almak yeterli olabilir, token tasarrufu için
+        for msg in history[-6:]:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            formatted.append(f"{role}: {msg['content']}")
+        return "\n".join(formatted)
+
+    # router.py dosyasında _build_unified_prompt metodunu tamamen bu şekilde değiştirin:
+
+    def _build_unified_prompt(self, text: str, history_str: str) -> str:
+        # İstasyon açıklamalarını da ekleyelim ki "Yemek" denince "station_a" olduğunu anlasın
         return f"""
-You are the decision-making core for a robot assistant. Your task is to analyze the user's input and classify it into one of three categories: "navigation", "iot", or "chat".
-
-User Request: "{text}"
-
----
-CHECKLIST AND RULES:
-
-1. NAVIGATION (navigation)
-Use this if the user wants to go to one of the following stations.
-Stations:
-{self.station_prompt_list}
-Valid Station Codes: {self.station_names}
-
-2. SMART DEVICE (iot)
-Use this if the user wants to control (turn on/off, set) one of the following devices.
-Device Codes: {self.iot_device_prompt_list}
-Valid Actions (action):
- - For lights: "turn_on", "turn_off"
-
-3. CHAT (chat)
-Use this if the request is not related to navigation or IoT (e.g., greetings, asking for the weather, general questions).
+You are a decision-making router. Your job is to map the User Input to the correct Tool and Arguments.
+Response must be a valid JSON object.
 
 ---
-JSON OUTPUT FORMAT:
-You must respond ONLY with a SINGLE JSON object that matches one of the following formats.
+CONTEXT:
+{history_str}
 
-For Navigation:
-{{
-  "request_type": "navigation",
-  "target_station": "<One of the station codes, e.g., 'station_a'>",
-  "reason": "<short justification>"
-}}
+USER INPUT: "{text}"
 
-For Smart Device:
-{{
-  "request_type": "iot",
-  "target_device_code": "<One of the device codes, e.g., 'ORTAK_ALAN_TABELA'>",
-  "action": "<One of the valid actions, e.g., 'turn_off' or 'turn on'>",
-  "reason": "<short justification>"
-}}
+---
+AVAILABLE ASSETS (Strictly use these codes):
 
-For Chat:
+1. **VALID STATIONS** (For Navigation):
+{self.station_prompt_list} 
+(Use ONLY the station codes like 'station_a', 'station_b' etc.)
+
+2. **VALID IOT DEVICES** (For Control):
+[{self.iot_device_prompt_list}]
+(Use ONLY these exact codes for 'target_device_code')
+
+---
+DECISION LOGIC:
+
+1. **SEARCH (High Priority)**
+   - Use this if the user asks for INFORMATION, FACTS, NEWS, DEFINITIONS, or about SPECIFIC ENTITIES (Companies, People, Products).
+   - Example: "What is Hurricane?", "Hava nasıl?", "Dolar ne kadar?", "Tell me about yourself".
+   - Output: {{"request_type": "search", "query": "optimized query"}}
+
+2. **NAVIGATION**
+   - Use this if the user wants to GO somewhere listed in "VALID STATIONS".
+   - Example: "Go to the kitchen", "Take me to food court".
+   - Output: {{"request_type": "navigation", "target_station": "station_code"}}
+
+3. **IOT**
+   - Use this if the user wants to CONTROL a device listed in "VALID IOT DEVICES".
+   - Example: "Turn on the lounge light", "Işıkları kapat".
+   - Output: {{"request_type": "iot", "target_device_code": "DEVICE_CODE", "action": "turn_on/off"}}
+
+4. **CHAT**
+   - Use this ONLY for simple Greetings ("Hello") or Confirmations ("Yes", "No").
+   - DO NOT use Chat for questions like "What is X?". Use Search instead.
+
+---
+JSON SCHEMA:
 {{
-  "request_type": "chat",
-  "reason": "<short justification, e.g., 'general chat', 'greeting'>"
+  "request_type": "search" | "navigation" | "iot" | "chat",
+  "query": "string (optional, for search)",
+  "target_station": "string (optional, exact station code)",
+  "target_device_code": "string (optional, exact device code)",
+  "action": "string (optional, 'turn_on' or 'turn_off')"
 }}
 """
 
-    def classify_intent(self, text: str) -> Dict[str, Any]:
+    def classify_intent(
+        self, text: str, history: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
         """
-        (BLOKE EDİCİ) Birleşik LLM'i çağırır ve sonucu JSON olarak döndürür.
-        Bu metot 'run_in_executor' içinde çalıştırılmalıdır.
+        Hafıza destekli niyet analizi.
         """
-        prompt = self._build_unified_prompt(text)
+        history_str = self._format_history(history)
+        prompt = self._build_unified_prompt(text, history_str)
 
-        # LLM'i çağır (Bu non-streaming, bloke edici bir çağrıdır)
-        raw_response = self.llm.complete(prompt)
+        # --- DEBUG BAŞLANGIÇ ---
+        print(f"\n[ROUTER] Analiz ediliyor: '{text}'")
+        # -----------------------
 
-        # Yanıtı JSON olarak bul ve ayrıştır
+        # LLM'i JSON Modunda çağırıyoruz!
+        raw_response = self.llm.complete(prompt, json_mode=True)
+
+        # --- DEBUG DEVAM ---
+        print(f"[ROUTER RAW OUTPUT]: {raw_response}")
+        # Eğer burada mantıklı bir JSON görüp yine de search yapmıyorsa parser hatasıdır.
+        # -------------------
+
         data = safe_json_find(raw_response)
 
         if not data:
-            print(
-                f"[AGENT-ERROR] LLM'den geçerli JSON alınamadı. Yanıt: {raw_response}"
-            )
-            return {"request_type": "chat", "reason": "LLM yanıtı ayrıştırılamadı"}
+            print("[ROUTER ERROR] JSON parse edilemedi, CHAT'e düşülüyor.")
+            return {"request_type": "chat", "reason": "Parse error"}
 
-        # JSON'un geçerli bir 'request_type' içerdiğinden emin ol
-        if data.get("request_type") not in ["navigation", "iot", "chat"]:
-            print(
-                f"[AGENT-WARN] LLM'den bilinmeyen request_type alındı: {data.get('request_type')}"
-            )
-            return {"request_type": "chat", "reason": "Bilinmeyen request_type"}
+        # Güvenlik kontrolü
+        req_type = data.get("request_type")
+        if req_type not in ["navigation", "iot", "chat", "search"]:
+            print(f"[ROUTER WARN] Bilinmeyen tip: {req_type}, CHAT yapılıyor.")
+            return {"request_type": "chat"}
 
-        print(f"[AGENT-CLASSIFY] Karar: {json.dumps(data)}")
+        print(f"[ROUTER DECISION] >>> {req_type.upper()} <<<\n")
         return data
+
+    def analyze_confirmation(self, text: str, context_action: str) -> str:
+        """
+        Kullanıcının onay durumunu analiz eder.
+        Dönüş: 'yes', 'no' veya 'change_topic'
+        """
+        prompt = f"""
+        TASK: Analyze the user's response to a confirmation request.
+        
+        CONTEXT: The robot asked: "Do you want to start {context_action}?"
+        USER SAID: "{text}"
+        
+        INSTRUCTIONS:
+        - If the user agrees (e.g., "yes", "sure", "ok", "evet", "tamam", "başla"): Output "yes"
+        - If the user refuses (e.g., "no", "cancel", "stop", "hayır", "iptal", "vazgeç"): Output "no"
+        - If the user ignores the question and talks about something else (e.g., "what is the weather?", "turn on lights", "merhaba"): Output "change_topic"
+        
+        OUTPUT ONLY ONE WORD: "yes", "no", or "change_topic"
+        """
+        response = self.llm.complete(prompt).strip().lower()
+
+        if "yes" in response:
+            return "yes"
+        if "no" in response:
+            return "no"
+        return "change_topic"  # Varsayılan olarak konuyu değiştir
 
     def execute_iot_command(
         self, target_code: str, action: str, value: Any, lang: Literal["en", "tr"]

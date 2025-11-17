@@ -1,4 +1,12 @@
-.env
+# Model dosyaları
+faster-whisper-large-v3/
+*.pt
+*.bin
 
+# Python gereksizleri
 __pycache__/
 *.pyc
+.env
+venv/
+.vscode/
+*.ipynb

@@ -1,12 +1,17 @@
 import numpy as np
 import faster_whisper
 
+
 class STTPipe:
-    def __init__(self,model_path:str = "faster-whisper-base"):
-        self.model = faster_whisper.WhisperModel(model_path, device="cuda", local_files_only=True,compute_type="float16")
+    def __init__(self, model_path: str = "faster-whisper-base"):
+        self.model = faster_whisper.WhisperModel(
+            model_path, device="cuda", local_files_only=True, compute_type="float16"
+        )
 
     def stt(self, audio_data: bytes):
-        audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float16) / 32768.0
+        audio_np = (
+            np.frombuffer(audio_data, dtype=np.int16).astype(np.float16) / 32768.0
+        )
         text = ""
         segments, info = self.model.transcribe(
             audio_np,
@@ -22,8 +27,7 @@ class STTPipe:
             task="transcribe",
             multilingual=True,
             log_progress=True,
-            language_detection_threshold=0.80
-
+            language_detection_threshold=0.90,
         )
         for seg in segments:
             text += seg.text
