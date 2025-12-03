@@ -1,4 +1,0 @@
-0.279 input audio.
-2.88 output audio.
-3.159 total hourly.
-758 total monthly(roughly calculated.)
